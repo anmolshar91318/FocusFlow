@@ -1,6 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 
-const API = "http://localhost:5000/api";
+const RAW_API_URL =
+  import.meta.env.VITE_API_URL ||
+  import.meta.env.VITE_BACKEND_URL ||
+  "http://localhost:5000/api";
+const SANITIZED_URL = RAW_API_URL.replace(/\/+$/, "");
+const API = SANITIZED_URL.endsWith("/api") ? SANITIZED_URL : `${SANITIZED_URL}/api`;
 const FOCUS_SECONDS = 25 * 60;
 const BREAK_SECONDS = 5 * 60;
 
@@ -17,6 +22,83 @@ async function api(path, options = {}) {
 
 function formatTime(n) {
   return `${Math.floor(n / 60).toString().padStart(2, "0")}:${(n % 60).toString().padStart(2, "0")}`;
+}
+
+function formatDate(dateStr) {
+  if (!dateStr) return "";
+  try {
+    const d = new Date(dateStr.endsWith("Z") ? dateStr : dateStr + "Z");
+    return d.toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+  } catch {
+    return dateStr;
+  }
+}
+
+const VALID_SECTIONS = new Set([
+  "dashboard",
+  "progression",
+  "tasks",
+  "focus",
+  "habits",
+  "analytics",
+  "assistant",
+]);
+
+function getInitialSection() {
+  try {
+    // 1. Check URL hash first (e.g. #tasks or #focus)
+    const hash = window.location.hash.replace(/^#\/?/, "").toLowerCase().trim();
+    if (VALID_SECTIONS.has(hash)) return hash;
+
+    // 2. Check localStorage
+    const saved = localStorage.getItem("focusflow-active-tab");
+    if (saved && VALID_SECTIONS.has(saved)) return saved;
+  } catch {}
+  return "dashboard";
+}
+
+function getInitialTimerState() {
+  try {
+    const raw = localStorage.getItem("focusflow-timer-state");
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const focusMins = Math.max(1, Math.min(180, Number(parsed.focusMinutesSetting) || 25));
+    const breakMins = Math.max(1, Math.min(60, Number(parsed.breakMinutesSetting) || 5));
+    const mode = parsed.mode === "break" ? "break" : "focus";
+
+    let remaining = Number(parsed.remaining);
+    if (isNaN(remaining) || remaining < 0) {
+      remaining = (mode === "focus" ? focusMins : breakMins) * 60;
+    }
+
+    let running = Boolean(parsed.running);
+
+    if (running && parsed.targetEndTime) {
+      const now = Date.now();
+      const secondsLeft = Math.round((parsed.targetEndTime - now) / 1000);
+      if (secondsLeft > 0) {
+        remaining = secondsLeft;
+        running = true;
+      } else {
+        remaining = (mode === "focus" ? focusMins : breakMins) * 60;
+        running = false;
+      }
+    }
+
+    return {
+      mode,
+      focusMinutesSetting: focusMins,
+      breakMinutesSetting: breakMins,
+      remaining,
+      running,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function Icon({ name, size = 18 }) {
@@ -74,6 +156,71 @@ function Icon({ name, size = 18 }) {
       return (
         <svg {...props}>
           <path d="M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3L12 3z" />
+        </svg>
+      );
+    case "award":
+      return (
+        <svg {...props}>
+          <circle cx="12" cy="8" r="7" />
+          <polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88" />
+        </svg>
+      );
+    case "trophy":
+      return (
+        <svg {...props}>
+          <path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6" />
+          <path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18" />
+          <path d="M4 22h16" />
+          <path d="M10 14.66V17c0 .55-.45 1-1 1H7c-.55 0-1 .45-1 1v1c0 .55.45 1 1 1h10c.55 0 1-.45 1-1v-1c0-.55-.45-1-1-1h-2c-.55 0-1-.45-1-1v-2.34" />
+          <path d="M18 4H6v5a6 6 0 0 0 12 0V4z" />
+        </svg>
+      );
+    case "crown":
+      return (
+        <svg {...props}>
+          <path d="M2 4l3 12h14l3-12-6 7-4-7-4 7-6-7zm3 16h14v2H5v-2z" />
+        </svg>
+      );
+    case "zap":
+      return (
+        <svg {...props}>
+          <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+        </svg>
+      );
+    case "target":
+      return (
+        <svg {...props}>
+          <circle cx="12" cy="12" r="10" />
+          <circle cx="12" cy="12" r="6" />
+          <circle cx="12" cy="12" r="2" />
+        </svg>
+      );
+    case "brain":
+      return (
+        <svg {...props}>
+          <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 4.44-5.04z" />
+          <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-4.44-5.04z" />
+        </svg>
+      );
+    case "sunrise":
+      return (
+        <svg {...props}>
+          <path d="M12 2v4M4.93 10.93l1.41 1.41M2 18h2M20 18h2M17.66 12.34l1.41-1.41M16 18a4 4 0 0 0-8 0" />
+          <line x1="2" y1="22" x2="22" y2="22" />
+        </svg>
+      );
+    case "checkCircle":
+      return (
+        <svg {...props}>
+          <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+          <polyline points="22 4 12 14.01 9 11.01" />
+        </svg>
+      );
+    case "lock":
+      return (
+        <svg {...props}>
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+          <path d="M7 11V7a5 5 0 0 1 10 0v4" />
         </svg>
       );
     case "sun":
@@ -164,6 +311,38 @@ function Icon({ name, size = 18 }) {
           <polyline points="12 5 19 12 12 19" />
         </svg>
       );
+    case "sparkle":
+      return (
+        <svg {...props}>
+          <path d="M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3L12 3z" />
+        </svg>
+      );
+    case "send":
+      return (
+        <svg {...props}>
+          <line x1="22" y1="2" x2="11" y2="13" />
+          <polygon points="22 2 15 22 11 13 2 9 22 2" />
+        </svg>
+      );
+    case "settings":
+      return (
+        <svg {...props}>
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+        </svg>
+      );
+    case "key":
+      return (
+        <svg {...props}>
+          <path d="M21 2l-2 2m-1.5 1.5L14 9l-1.5-1.5L11 9l1.5 1.5L9 14a5 5 0 1 1-7-7 5 5 0 0 1 7 7l3.5-3.5L14 12l1.5-1.5L14 9l3.5-3.5M21 2l-2 2" />
+        </svg>
+      );
+    case "chevronDown":
+      return (
+        <svg {...props}>
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      );
     default:
       return null;
   }
@@ -179,9 +358,12 @@ export default function App() {
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState("");
   const [profileOpen, setProfileOpen] = useState(false);
-  const [activeSection, setActiveSection] = useState("dashboard");
+  const [profileModalOpen, setProfileModalOpen] = useState(false);
+  const [activeSection, setActiveSection] = useState(() => getInitialSection());
   const [tasks, setTasks] = useState([]);
   const [sessions, setSessions] = useState([]);
+  const [progression, setProgression] = useState(null);
+  const [toasts, setToasts] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -193,11 +375,19 @@ export default function App() {
   const [editingTaskId, setEditingTaskId] = useState(null);
   const [editingTitle, setEditingTitle] = useState("");
 
-  const [mode, setMode] = useState("focus");
-  const [focusMinutesSetting, setFocusMinutesSetting] = useState(25);
-  const [breakMinutesSetting, setBreakMinutesSetting] = useState(5);
-  const [remaining, setRemaining] = useState(FOCUS_SECONDS);
-  const [running, setRunning] = useState(false);
+  const initialTimer = useMemo(() => getInitialTimerState(), []);
+
+  const [mode, setMode] = useState(() => initialTimer?.mode || "focus");
+  const [focusMinutesSetting, setFocusMinutesSetting] = useState(
+    () => initialTimer?.focusMinutesSetting || 25
+  );
+  const [breakMinutesSetting, setBreakMinutesSetting] = useState(
+    () => initialTimer?.breakMinutesSetting || 5
+  );
+  const [remaining, setRemaining] = useState(
+    () => (initialTimer?.remaining !== undefined ? initialTimer.remaining : FOCUS_SECONDS)
+  );
+  const [running, setRunning] = useState(() => initialTimer?.running || false);
 
   const [nightMode, setNightMode] = useState(() => localStorage.getItem("focusflow-theme") === "night");
   const [taskFilter, setTaskFilter] = useState("All");
@@ -213,6 +403,18 @@ export default function App() {
   });
   const todayKey = new Date().toISOString().slice(0, 10);
 
+  const addToast = useCallback((toast) => {
+    const id = Date.now() + Math.random();
+    setToasts((prev) => [...prev, { ...toast, id }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 4500);
+  }, []);
+
+  const dismissToast = useCallback((id) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
   useEffect(() => {
     if (user) {
       localStorage.setItem(`ff-habits-${user.id || user.email}`, JSON.stringify(habits));
@@ -222,6 +424,20 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("focusflow-theme", nightMode ? "night" : "day");
   }, [nightMode]);
+
+  useEffect(() => {
+    try {
+      const timerState = {
+        mode,
+        focusMinutesSetting,
+        breakMinutesSetting,
+        remaining,
+        running,
+        targetEndTime: running ? Date.now() + remaining * 1000 : null,
+      };
+      localStorage.setItem("focusflow-timer-state", JSON.stringify(timerState));
+    } catch {}
+  }, [mode, focusMinutesSetting, breakMinutesSetting, remaining, running]);
 
   useEffect(() => {
     api("/auth/me")
@@ -235,9 +451,46 @@ export default function App() {
     setLoading(true);
     try {
       setError("");
-      const [t, s] = await Promise.all([api("/tasks"), api("/sessions")]);
-      setTasks(t.tasks);
-      setSessions(s.sessions);
+      const [t, s, p] = await Promise.all([
+        api("/tasks"),
+        api("/sessions"),
+        api("/progression").catch(() => ({ progression: null })),
+      ]);
+      setTasks(t.tasks || []);
+      setSessions(s.sessions || []);
+      if (p && p.progression) {
+        setProgression(p.progression);
+      } else {
+        // Resilient fallback progression if server response is null or delayed
+        const doneCount = (t?.tasks || []).filter((task) => task.completed).length;
+        const focusMins = (s?.sessions || []).reduce((acc, sess) => acc + (Number(sess.duration_minutes) || 0), 0);
+        const estXp = doneCount * 10 + focusMins;
+        const level = estXp >= 700 ? 5 : estXp >= 450 ? 4 : estXp >= 250 ? 3 : estXp >= 100 ? 2 : 1;
+        const nextXp = level === 1 ? 100 : level === 2 ? 250 : level === 3 ? 450 : 700;
+        const curBase = level === 1 ? 0 : level === 2 ? 100 : level === 3 ? 250 : 450;
+        const curLvlXp = estXp - curBase;
+        const pct = Math.min(100, Math.max(0, Math.round((curLvlXp / (nextXp - curBase)) * 100)));
+        setProgression((prev) => prev || {
+          current_level: level,
+          level_title: level >= 5 ? "Productivity Enthusiast" : level >= 3 ? "Focus Explorer" : level >= 2 ? "Getting Started" : "Beginner",
+          rank_tier: estXp >= 1000 ? "Silver" : "Bronze",
+          rank_badge: estXp >= 1000 ? "silver" : "bronze",
+          rank_description: "Foundation of Focus",
+          current_level_xp: curLvlXp,
+          next_level_xp: nextXp - curBase,
+          total_xp: estXp,
+          progress_percent: pct,
+          total_focus_hours: Math.round((focusMins / 60) * 10) / 10,
+          total_sessions: (s?.sessions || []).length,
+          completed_tasks: doneCount,
+          current_streak: 0,
+          weekly_xp: estXp,
+          unlocked_achievements_count: 0,
+          total_achievements_count: 12,
+          achievements: [],
+          recent_activity: [],
+        });
+      }
     } catch (e) {
       setError(`${e.message} Please check that the backend is running.`);
     } finally {
@@ -251,12 +504,34 @@ export default function App() {
       try {
         const saved = localStorage.getItem(`ff-habits-${user.id || user.email}`);
         if (saved) setHabits(JSON.parse(saved));
-      } catch {}
+      } catch { }
     } else {
       setTasks([]);
       setSessions([]);
+      setProgression(null);
     }
   }, [user, refresh]);
+
+  // Persist active section across page refreshes and synchronize with URL hash
+  useEffect(() => {
+    try {
+      localStorage.setItem("focusflow-active-tab", activeSection);
+      if (window.location.hash !== `#${activeSection}`) {
+        window.history.replaceState(null, "", `#${activeSection}`);
+      }
+    } catch { }
+  }, [activeSection]);
+
+  useEffect(() => {
+    function handleHashChange() {
+      const hash = window.location.hash.replace(/^#\/?/, "").toLowerCase().trim();
+      if (VALID_SECTIONS.has(hash)) {
+        setActiveSection(hash);
+      }
+    }
+    window.addEventListener("hashchange", handleHashChange);
+    return () => window.removeEventListener("hashchange", handleHashChange);
+  }, []);
 
   async function submitAuth(e) {
     e.preventDefault();
@@ -288,10 +563,23 @@ export default function App() {
     setUser(null);
     setTasks([]);
     setSessions([]);
+    setProgression(null);
     setRunning(false);
     setProfileOpen(false);
+    setProfileModalOpen(false);
+    try {
+      localStorage.removeItem("focusflow-timer-state");
+      localStorage.removeItem("focusflow-active-tab");
+      window.history.replaceState(null, "", "#dashboard");
+    } catch {}
+    setActiveSection("dashboard");
+    setMode("focus");
+    setFocusMinutesSetting(25);
+    setBreakMinutesSetting(5);
+    setRemaining(FOCUS_SECONDS);
   }
 
+  // Timer countdown and completion effect with XP & Progression integration
   useEffect(() => {
     if (!running || !user) return;
     const id = window.setInterval(() => {
@@ -304,19 +592,78 @@ export default function App() {
             method: "POST",
             body: JSON.stringify({ duration_minutes: focusMinutesSetting }),
           })
-            .then(refresh)
+            .then((data) => {
+              if (data.progression) setProgression(data.progression);
+              refresh();
+
+              if (data.xp_earned > 0) {
+                addToast({
+                  type: "xp",
+                  title: "Focus Block Completed!",
+                  message: `Earned +${data.xp_earned} XP for ${focusMinutesSetting} minutes of dedicated work.`,
+                  xp: data.xp_earned,
+                  icon: "focus",
+                });
+              }
+
+              if (data.streak_bonus > 0) {
+                addToast({
+                  type: "streak",
+                  title: "Daily Streak Active!",
+                  message: `Productivity streak maintained (+${data.streak_bonus} XP).`,
+                  xp: data.streak_bonus,
+                  icon: "flame",
+                });
+              }
+
+              if (data.weekly_bonus > 0) {
+                addToast({
+                  type: "weekly",
+                  title: "Weekly Focus Goal Reached!",
+                  message: `Surpassed 2 hours of focus this week (+${data.weekly_bonus} XP)!`,
+                  xp: data.weekly_bonus,
+                  icon: "trophy",
+                });
+              }
+
+              if (data.leveled_up) {
+                addToast({
+                  type: "level",
+                  title: "Level Up!",
+                  message: `Congratulations! You reached Level ${data.new_level}: ${data.new_title}`,
+                  icon: "award",
+                });
+              }
+
+              if (data.newly_unlocked_achievements && data.newly_unlocked_achievements.length > 0) {
+                data.newly_unlocked_achievements.forEach((ach) => {
+                  addToast({
+                    type: "achievement",
+                    title: "Achievement Unlocked!",
+                    message: `${ach.name}: ${ach.description} (+${ach.xp_reward} XP)`,
+                    icon: ach.icon || "award",
+                  });
+                });
+              }
+            })
             .catch((e) => setError(e.message));
-          window.alert("Focus session complete! Take a short break.");
+
           setMode("break");
           return breakMinutesSetting * 60;
         }
-        window.alert("Break complete! Ready for another focus session?");
+
+        addToast({
+          type: "xp",
+          title: "Break Complete!",
+          message: "Ready for another high-impact focus session?",
+          icon: "sun",
+        });
         setMode("focus");
         return focusMinutesSetting * 60;
       });
     }, 1000);
     return () => window.clearInterval(id);
-  }, [running, mode, refresh, user, focusMinutesSetting, breakMinutesSetting]);
+  }, [running, mode, refresh, user, focusMinutesSetting, breakMinutesSetting, addToast]);
 
   const done = tasks.filter((t) => t.completed).length;
   const focusMinutes = sessions.reduce((sum, s) => sum + s.duration_minutes, 0);
@@ -351,6 +698,48 @@ export default function App() {
         body: JSON.stringify({ completed: !task.completed }),
       });
       setTasks((prev) => prev.map((t) => (t.id === task.id ? data.task : t)));
+
+      if (data.progression) setProgression(data.progression);
+
+      if (data.xp_earned > 0) {
+        addToast({
+          type: "xp",
+          title: "Task Completed!",
+          message: `Earned +${data.xp_earned} XP for finishing “${task.title.slice(0, 36)}”.`,
+          xp: data.xp_earned,
+          icon: "check",
+        });
+      }
+
+      if (data.streak_bonus > 0) {
+        addToast({
+          type: "streak",
+          title: "Daily Streak Active!",
+          message: `Productivity streak recorded (+${data.streak_bonus} XP).`,
+          xp: data.streak_bonus,
+          icon: "flame",
+        });
+      }
+
+      if (data.leveled_up) {
+        addToast({
+          type: "level",
+          title: "Level Up!",
+          message: `Level ${data.new_level}: ${data.new_title}!`,
+          icon: "award",
+        });
+      }
+
+      if (data.newly_unlocked_achievements && data.newly_unlocked_achievements.length > 0) {
+        data.newly_unlocked_achievements.forEach((ach) => {
+          addToast({
+            type: "achievement",
+            title: "Achievement Unlocked!",
+            message: `${ach.name}: ${ach.description} (+${ach.xp_reward} XP)`,
+            icon: ach.icon || "award",
+          });
+        });
+      }
     } catch (e) {
       setError(e.message);
     }
@@ -399,11 +788,11 @@ export default function App() {
       v.map((x) =>
         x.id === h.id
           ? {
-              ...x,
-              completedDates: (x.completedDates || []).includes(todayKey)
-                ? x.completedDates.filter((d) => d !== todayKey)
-                : [...(x.completedDates || []), todayKey],
-            }
+            ...x,
+            completedDates: (x.completedDates || []).includes(todayKey)
+              ? x.completedDates.filter((d) => d !== todayKey)
+              : [...(x.completedDates || []), todayKey],
+          }
           : x
       )
     );
@@ -445,9 +834,8 @@ export default function App() {
       );
     });
     const t = sorted[0];
-    return `Start with “${t.title}”. It is ${t.priority.toLowerCase()} priority${
-      t.due_date ? ` and is due ${t.due_date}` : ""
-    }. Consider one ${Math.min(Number(t.estimated_minutes) || 30, 25)}-minute focus block, then review your progress.`;
+    return `Start with “${t.title}”. It is ${t.priority.toLowerCase()} priority${t.due_date ? ` and is due ${t.due_date}` : ""
+      }. Consider one ${Math.min(Number(t.estimated_minutes) || 30, 25)}-minute focus block, then review your progress.`;
   }, [pendingTasks, todayKey]);
 
   const totalSeconds = (mode === "focus" ? focusMinutesSetting : breakMinutesSetting) * 60;
@@ -550,12 +938,12 @@ export default function App() {
               {authBusy
                 ? "Please wait…"
                 : authMode === "login"
-                ? "Log in to FocusFlow"
-                : "Create my account"}
+                  ? "Log in to FocusFlow"
+                  : "Create my account"}
               <Icon name="arrowRight" size={16} />
             </button>
           </form>
-          <p className="auth-foot">Your tasks and focus history are kept in your own account.</p>
+          <p className="auth-foot">Your tasks, focus sessions, and achievements are saved securely.</p>
           <button
             type="button"
             className="auth-theme"
@@ -571,13 +959,14 @@ export default function App() {
           <div className="auth-aside-mark">
             <Icon name="assistant" size={26} />
           </div>
-          <p className="eyebrow">SMALL STEPS ADD UP</p>
-          <h2>Make room for your best work.</h2>
+          <p className="eyebrow">PRODUCTIVITY PROGRESSION</p>
+          <h2>Turn disciplined effort into lasting mastery.</h2>
           <p>
-            Plan your tasks, protect your focus time, and celebrate the progress you make every day.
+            Earn XP for focused work, unlock achievements, climb prestige ranks, and build genuine
+            study consistency.
           </p>
           <div className="auth-quote">
-            “A little progress each day adds up to big results.”
+            “Success is the sum of small efforts, repeated day in and day out.”
           </div>
         </aside>
       </div>
@@ -586,6 +975,7 @@ export default function App() {
 
   const navItems = [
     { id: "dashboard", label: "Dashboard", icon: "dashboard" },
+    { id: "progression", label: "Progression & Badges", icon: "award" },
     { id: "tasks", label: "Task management", icon: "tasks" },
     { id: "focus", label: "Focus timer", icon: "focus" },
     { id: "habits", label: "Habit tracker", icon: "habits" },
@@ -594,7 +984,8 @@ export default function App() {
   ];
 
   const pageMeta = {
-    dashboard: ["Dashboard", "Your productivity overview and daily priorities at a glance."],
+    dashboard: ["Dashboard", "Your productivity overview, daily progression, and priorities."],
+    progression: ["Progression & Rewards", "Level up, achieve ranks, and earn badges through genuine deep work."],
     tasks: ["Task management", "Plan, prioritize, and keep every commitment organized."],
     focus: ["Focus timer", "Protect your attention with structured work and break sessions."],
     habits: ["Habit tracker", "Build consistency through small, repeatable daily actions."],
@@ -604,6 +995,19 @@ export default function App() {
 
   return (
     <div className={`layout ff-layout ${nightMode ? "dark" : ""}`} data-theme={nightMode ? "night" : "day"}>
+      {/* Toast Notification Layer */}
+      <ToastNotification toasts={toasts} onDismiss={dismissToast} />
+
+      {/* Profile Modal Dialog */}
+      {profileModalOpen && (
+        <ProfileModal
+          user={user}
+          progression={progression}
+          onClose={() => setProfileModalOpen(false)}
+          onLogout={logout}
+        />
+      )}
+
       <aside className="sidebar">
         <a
           className="brand"
@@ -633,13 +1037,20 @@ export default function App() {
           ))}
         </nav>
 
-        <div className="side-note">
-          <div className="side-note-icon">
-            <Icon name="assistant" size={16} />
+        {progression && (
+          <div
+            className="side-note"
+            style={{ cursor: "pointer" }}
+            onClick={() => setActiveSection("progression")}
+            title="Click to view full progression"
+          >
+            <div className="side-note-icon">
+              <Icon name="award" size={16} />
+            </div>
+            <b>Level {progression.current_level} · {progression.rank_tier}</b>
+            <p>{progression.level_title} ({progression.total_xp} XP)</p>
           </div>
-          <b>Small steps add up.</b>
-          <p>Make steady progress one focused block at a time.</p>
-        </div>
+        )}
 
         <div className="side-footer">
           <span>MCA MINOR PROJECT</span>
@@ -647,16 +1058,18 @@ export default function App() {
         </div>
       </aside>
 
-      <main className="main ff-main">
-        <header className="header">
-          <div className="header-title">
-            <p className="eyebrow">FOCUSFLOW WORKSPACE</p>
-            <h1>
-              {pageMeta[activeSection][0]}
-              <span>.</span>
-            </h1>
-            <p className="muted">{pageMeta[activeSection][1]}</p>
-          </div>
+      <main className={`main ff-main ${activeSection === "assistant" ? "assistant-mode" : ""}`}>
+        <header className={`header ${activeSection === "assistant" ? "header-minimal" : ""}`}>
+          {activeSection !== "assistant" && (
+            <div className="header-title">
+              <p className="eyebrow">FOCUSFLOW WORKSPACE</p>
+              <h1>
+                {pageMeta[activeSection][0]}
+                <span>.</span>
+              </h1>
+              <p className="muted">{pageMeta[activeSection][1]}</p>
+            </div>
+          )}
 
           <div className="header-actions">
             <button
@@ -677,17 +1090,46 @@ export default function App() {
             </button>
 
             <div className="profile-wrap">
-              <button className="profile-button" onClick={() => setProfileOpen((v) => !v)}>
+              <button
+                className="profile-button"
+                onClick={() => setProfileOpen((v) => !v)}
+                aria-expanded={profileOpen}
+              >
                 <span className="avatar">{user.name.trim().charAt(0).toUpperCase()}</span>
                 <span className="profile-name">{user.name}</span>
-                <span className="profile-chevron">⌄</span>
+                {progression && (
+                  <span className={`rank-chip rank-${progression.rank_badge || "bronze"}`}>
+                    Lv {progression.current_level}
+                  </span>
+                )}
+                <span className={`profile-chevron ${profileOpen ? "open" : ""}`}>
+                  <Icon name="chevronDown" size={13} />
+                </span>
               </button>
               {profileOpen && (
                 <div className="profile-menu">
                   <div className="profile-menu-info">
                     <b>{user.name}</b>
                     <small>{user.email}</small>
+                    {progression && (
+                      <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6 }}>
+                        <span className={`rank-chip rank-${progression.rank_badge || "bronze"}`}>
+                          {progression.rank_tier} Tier
+                        </span>
+                        <span className="level-chip">Level {progression.current_level}</span>
+                      </div>
+                    )}
                   </div>
+                  <button
+                    onClick={() => {
+                      setProfileOpen(false);
+                      setProfileModalOpen(true);
+                    }}
+                    style={{ color: "var(--accent)", borderBottom: "1px solid var(--border-subtle)", borderRadius: 0, paddingBottom: 10, marginBottom: 6 }}
+                  >
+                    <Icon name="award" size={15} />
+                    <span>View Profile & Progression</span>
+                  </button>
                   <button onClick={logout}>
                     <Icon name="logout" size={15} />
                     <span>Log out</span>
@@ -734,6 +1176,12 @@ export default function App() {
               </button>
             </section>
 
+            {/* Dashboard Productivity Progression Widget */}
+            <DashboardProgressionWidget
+              progression={progression}
+              onOpenProgression={() => setActiveSection("progression")}
+            />
+
             <section className="stats">
               <Stat label="Total tasks" value={tasks.length} detail="In your workspace" icon="tasks" tone="purple" />
               <Stat label="Completed" value={done} detail={`${pendingTasks.length} still pending`} icon="check" tone="green" />
@@ -779,6 +1227,7 @@ export default function App() {
                             <span className="meta-chip">{t.category}</span>
                             <span>{t.estimated_minutes} min</span>
                             {t.due_date && <span>Due {t.due_date}</span>}
+                            <span className="ach-xp-tag">+10 XP</span>
                           </div>
                         </div>
                         <span className={`priority ${(t.priority || "Medium").toLowerCase()}`}>
@@ -815,7 +1264,16 @@ export default function App() {
                     <span className="ql-icon orange">
                       <Icon name="focus" size={16} />
                     </span>
-                    <span>Start a focus session</span>
+                    <span>Start a focus session (+25 XP)</span>
+                  </button>
+                  <button onClick={() => setActiveSection("progression")}>
+                    <span className="ql-icon purple">
+                      <Icon name="award" size={16} />
+                    </span>
+                    <span>
+                      Progression & Badges ({progression?.unlocked_achievements_count || 0}/
+                      {progression?.total_achievements_count || 12})
+                    </span>
                   </button>
                   <button onClick={() => setActiveSection("habits")}>
                     <span className="ql-icon purple">
@@ -835,6 +1293,17 @@ export default function App() {
           </div>
         )}
 
+        {/* Dedicated Progression & Badges Section */}
+        {activeSection === "progression" && (
+          <div className="page-content">
+            <ProgressionSection
+              user={user}
+              progression={progression}
+              onOpenProfileModal={() => setProfileModalOpen(true)}
+            />
+          </div>
+        )}
+
         {activeSection === "tasks" && (
           <div className="page-content">
             <section className="panel section-panel">
@@ -842,7 +1311,7 @@ export default function App() {
                 <div>
                   <p className="eyebrow">PLAN YOUR WORK</p>
                   <h2>Create a new task</h2>
-                  <p className="muted">Capture tasks, assign priorities, and estimate effort.</p>
+                  <p className="muted">Capture tasks, assign priorities, and earn +10 XP upon completion.</p>
                 </div>
                 <span className="badge">{pendingTasks.length} pending</span>
               </div>
@@ -933,6 +1402,7 @@ export default function App() {
                         className={`check ${t.completed ? "checked" : ""}`}
                         onClick={() => toggle(t)}
                         aria-label="Toggle task"
+                        title={t.completed ? "Mark pending" : "Complete task (+10 XP)"}
                       >
                         {t.completed && <Icon name="check" size={13} />}
                       </button>
@@ -963,6 +1433,7 @@ export default function App() {
                               <span className="meta-chip">{t.category}</span>
                               <span>{t.estimated_minutes} min</span>
                               {t.due_date && <span>Due {t.due_date}</span>}
+                              {!t.completed && <span className="ach-xp-tag">+10 XP</span>}
                             </div>
                           </>
                         )}
@@ -1004,10 +1475,14 @@ export default function App() {
             <section className="panel timer-page">
               <div className="panel-head">
                 <div>
-                  <p className="eyebrow">DEEP WORK</p>
+                  <p className="eyebrow">DEEP WORK REWARDS</p>
                   <h2>Pomodoro timer</h2>
                 </div>
-                <span className="badge">{mode === "focus" ? "Focus Mode" : "Rest Mode"}</span>
+                <span className="badge">
+                  {mode === "focus"
+                    ? `Focus Mode (+${focusMinutesSetting} XP)`
+                    : "Rest Mode"}
+                </span>
               </div>
 
               <div className="tabs timer-tabs">
@@ -1037,7 +1512,11 @@ export default function App() {
                 <div className="ring-center-copy">
                   <small>{mode === "focus" ? "FOCUS SESSION" : "SHORT BREAK"}</small>
                   <strong>{formatTime(remaining)}</strong>
-                  <span>{running ? "Session in progress…" : "Ready when you are"}</span>
+                  <span>
+                    {running
+                      ? "Deep work in progress…"
+                      : `Earn +${focusMinutesSetting} XP on completion`}
+                  </span>
                 </div>
               </div>
 
@@ -1099,7 +1578,7 @@ export default function App() {
                     <Icon name="focus" size={22} />
                   </div>
                   <b>No sessions recorded yet</b>
-                  <p>Complete a focus block to save it automatically to your account.</p>
+                  <p>Complete a focus block to save it and earn XP automatically.</p>
                 </div>
               ) : (
                 <div className="session-list">
@@ -1112,10 +1591,11 @@ export default function App() {
                         <b>{s.duration_minutes}-minute focus block</b>
                         <small>
                           {s.completed_at
-                            ? new Date(s.completed_at + "Z").toLocaleString()
+                            ? new Date(s.completed_at.endsWith("Z") ? s.completed_at : s.completed_at + "Z").toLocaleString()
                             : "Completed session"}
                         </small>
                       </div>
+                      <span className="ach-xp-tag">+{s.duration_minutes} XP</span>
                     </div>
                   ))}
                 </div>
@@ -1279,7 +1759,7 @@ export default function App() {
                       <b>{s.duration_minutes} minute focus</b>
                       <small>
                         {s.completed_at
-                          ? new Date(s.completed_at + "Z").toLocaleString()
+                          ? new Date(s.completed_at.endsWith("Z") ? s.completed_at : s.completed_at + "Z").toLocaleString()
                           : "Saved session"}
                       </small>
                     </div>
@@ -1333,80 +1813,64 @@ export default function App() {
         )}
 
         {activeSection === "assistant" && (
-          <div className="page-content">
-            <section className="panel assistant-panel">
-              <div className="assistant-heading">
-                <span className="assistant-orb">
-                  <Icon name="assistant" size={24} />
-                </span>
-                <div>
-                  <p className="eyebrow">PRODUCTIVITY COACH</p>
-                  <h2>Your next best move</h2>
-                  <p className="muted">
-                    Rule-based recommendations derived directly from your deadlines and priorities.
-                  </p>
-                </div>
-              </div>
-
-              <div className="recommendation">
-                <span className="recommendation-label">RECOMMENDED ACTION</span>
-                <p>{suggestionText}</p>
-                <button className="primary btn-with-icon" onClick={() => setActiveSection("tasks")}>
-                  <span>Review my tasks</span>
-                  <Icon name="arrowRight" size={15} />
-                </button>
-              </div>
-
-              <div className="assistant-cards">
-                <article className="strategy-card">
-                  <div className="strategy-icon purple">
-                    <Icon name="tasks" size={18} />
-                  </div>
-                  <b>Prioritize urgent work</b>
-                  <p>
-                    Start with high-priority tasks or anything due today. Break larger deliverables
-                    into smaller, achievable steps.
-                  </p>
-                </article>
-
-                <article className="strategy-card">
-                  <div className="strategy-icon orange">
-                    <Icon name="focus" size={18} />
-                  </div>
-                  <b>Protect your focus</b>
-                  <p>
-                    Commit to a {focusMinutesSetting}-minute deep work block, silence notifications,
-                    and take a {breakMinutesSetting}-minute break afterward.
-                  </p>
-                  <button className="text-link btn-with-icon" onClick={() => setActiveSection("focus")}>
-                    <span>Open focus timer</span>
-                    <Icon name="arrowRight" size={13} />
-                  </button>
-                </article>
-
-                <article className="strategy-card">
-                  <div className="strategy-icon green">
-                    <Icon name="habits" size={18} />
-                  </div>
-                  <b>Build a repeatable routine</b>
-                  <p>
-                    Focus on one daily habit you can sustain effortlessly. Consistency beats
-                    occasional bursts of intensity.
-                  </p>
-                  <button className="text-link btn-with-icon" onClick={() => setActiveSection("habits")}>
-                    <span>Open habit tracker</span>
-                    <Icon name="arrowRight" size={13} />
-                  </button>
-                </article>
-              </div>
-            </section>
+          <div className="page-content ai-page-content">
+            <AIAssistantChat
+              user={user}
+              tasks={tasks}
+              sessions={sessions}
+              habits={habits}
+              progression={progression}
+              onStartFocusTask={(card) => {
+                const mins = Number(card.estimated_minutes) || 25;
+                setFocusMinutesSetting(mins);
+                setRemaining(mins * 60);
+                setMode("focus");
+                setRunning(true);
+                setActiveSection("focus");
+                addToast({
+                  type: "xp",
+                  title: "Focus Block Started!",
+                  message: `Timer set to ${mins}m for: ${card.title.slice(0, 36)}`,
+                  icon: "focus",
+                });
+              }}
+              onToggleTask={toggle}
+              onAddTaskDirect={async (card) => {
+                try {
+                  const data = await api("/tasks", {
+                    method: "POST",
+                    body: JSON.stringify({
+                      title: card.title,
+                      category: card.category || "Study",
+                      priority: card.priority || "Medium",
+                      estimated_minutes: Number(card.estimated_minutes) || 25,
+                      due_date: card.due_date || "",
+                    }),
+                  });
+                  setTasks((prev) => [data.task, ...prev]);
+                  addToast({
+                    type: "xp",
+                    title: "Task Added!",
+                    message: `Added “${card.title.slice(0, 36)}” to your workspace.`,
+                    icon: "check",
+                  });
+                  return true;
+                } catch (err) {
+                  setError(err.message);
+                  return false;
+                }
+              }}
+              addToast={addToast}
+            />
           </div>
         )}
 
-        <footer>
-          <span>FocusFlow · Smart Productivity Management System</span>
-          <span>Built for structured study habits.</span>
-        </footer>
+        {activeSection !== "assistant" && (
+          <footer>
+            <span>FocusFlow · Smart Productivity Management System</span>
+            <span>Built for structured study habits & deep work mastery.</span>
+          </footer>
+        )}
       </main>
     </div>
   );
@@ -1425,4 +1889,1134 @@ function Stat({ label, value, detail, icon, tone }) {
       <small>{detail}</small>
     </article>
   );
+}
+
+/* ==================== TOAST NOTIFICATION COMPONENT ==================== */
+function ToastNotification({ toasts, onDismiss }) {
+  if (!toasts.length) return null;
+  return (
+    <div className="ff-toast-container" aria-live="polite">
+      {toasts.map((toast) => (
+        <div key={toast.id} className={`ff-toast ff-toast-${toast.type}`}>
+          <div className="ff-toast-icon">
+            <Icon name={toast.icon || "award"} size={20} />
+          </div>
+          <div className="ff-toast-body">
+            <div className="ff-toast-header">
+              <b>{toast.title}</b>
+              {toast.xp && <span className="ff-toast-xp-pill">+{toast.xp} XP</span>}
+            </div>
+            <p>{toast.message}</p>
+          </div>
+          <button
+            className="ff-toast-close"
+            onClick={() => onDismiss(toast.id)}
+            aria-label="Dismiss notification"
+          >
+            ×
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ==================== DASHBOARD PROGRESSION WIDGET ==================== */
+function DashboardProgressionWidget({ progression, onOpenProgression }) {
+  const fallback = {
+    current_level: 1,
+    level_title: "Beginner",
+    rank_tier: "Bronze",
+    rank_badge: "bronze",
+    current_level_xp: 0,
+    next_level_xp: 100,
+    total_xp: 0,
+    progress_percent: 0,
+    weekly_xp: 0,
+    next_achievement: {
+      name: "First Focus",
+      icon: "target",
+      xp_reward: 25,
+      description: "Complete your first focus session.",
+      current_progress: 0,
+      target: 1,
+    },
+  };
+
+  const activeProgression = progression || fallback;
+  const {
+    current_level = 1,
+    level_title = "Beginner",
+    rank_tier = "Bronze",
+    rank_badge = "bronze",
+    current_level_xp = 0,
+    next_level_xp = 100,
+    total_xp = 0,
+    progress_percent = 0,
+    weekly_xp = 0,
+    next_achievement,
+  } = activeProgression;
+
+  const safePercent = Math.min(100, Math.max(0, Number(progress_percent) || 0));
+  const fillWidth = current_level_xp > 0 ? Math.max(3, safePercent) : 0;
+  const badge = (rank_badge || "bronze").toLowerCase();
+
+  return (
+    <section className="progression-widget-card">
+      <div className="progression-widget-top">
+        <div className="progression-badge-group">
+          <div className={`rank-crest rank-${badge}`}>
+            <Icon name="award" size={22} />
+          </div>
+          <div>
+            <div className="progression-level-line">
+              <span className="level-chip">Level {current_level}</span>
+              <span className={`rank-chip rank-${badge}`}>{rank_tier} Tier</span>
+            </div>
+            <h3 className="progression-title">{level_title}</h3>
+          </div>
+        </div>
+
+        <div className="progression-widget-stats">
+          <div className="stat-pill weekly-xp-pill">
+            <span className="stat-pill-icon">
+              <Icon name="zap" size={13} />
+            </span>
+            <span>+{weekly_xp} XP this week</span>
+          </div>
+          <button className="text-link btn-with-icon" onClick={onOpenProgression}>
+            <span>View Profile & Badges</span>
+            <Icon name="arrowRight" size={13} />
+          </button>
+        </div>
+      </div>
+
+      <div className="progression-bar-section">
+        <div className="progression-bar-labels">
+          <span className="progression-bar-current">
+            <b>{current_level_xp}</b> / {next_level_xp} XP to Level {current_level + 1} ({Math.round(safePercent)}%)
+          </span>
+          <span className="progression-bar-total">{total_xp} Total XP</span>
+        </div>
+        <div className="xp-progress-track">
+          <div
+            className={`xp-progress-fill rank-fill-${badge}`}
+            style={{ width: `${fillWidth}%` }}
+          />
+        </div>
+      </div>
+
+      {next_achievement && (
+        <div className="next-achievement-strip" onClick={onOpenProgression}>
+          <div className="next-ach-icon">
+            <Icon name={next_achievement.icon || "target"} size={16} />
+          </div>
+          <div className="next-ach-copy">
+            <div className="next-ach-title">
+              <small>NEXT BADGE</small>
+              <b>{next_achievement.name}</b>
+              <span className="ach-xp-tag">+{next_achievement.xp_reward} XP</span>
+            </div>
+            <p>{next_achievement.description}</p>
+          </div>
+          <div className="next-ach-progress-wrap">
+            <span>
+              {next_achievement.current_progress || 0} / {next_achievement.target || 1}
+            </span>
+            <div className="mini-progress-track">
+              <div
+                className="mini-progress-fill"
+                style={{
+                  width: `${Math.min(
+                    100,
+                    Math.round(
+                      ((next_achievement.current_progress || 0) / (next_achievement.target || 1)) * 100
+                    )
+                  )}%`,
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/* ==================== DEDICATED PROGRESSION & BADGES VIEW ==================== */
+function ProgressionSection({ user, progression, onOpenProfileModal }) {
+  const [tab, setTab] = useState("achievements");
+  const [categoryFilter, setCategoryFilter] = useState("All");
+
+  const fallback = {
+    total_xp: 0,
+    current_level: 1,
+    level_title: "Beginner",
+    rank_tier: "Bronze",
+    rank_badge: "bronze",
+    rank_description: "Foundation of Focus",
+    current_level_xp: 0,
+    next_level_xp: 100,
+    progress_percent: 0,
+    total_focus_hours: 0,
+    total_sessions: 0,
+    current_streak: 0,
+    unlocked_achievements_count: 0,
+    total_achievements_count: 12,
+    achievements: [],
+    recent_activity: [],
+  };
+
+  const activeProgression = progression || fallback;
+  const {
+    total_xp = 0,
+    current_level = 1,
+    level_title = "Beginner",
+    rank_tier = "Bronze",
+    rank_badge = "bronze",
+    rank_description = "Foundation of Focus",
+    current_level_xp = 0,
+    next_level_xp = 100,
+    progress_percent = 0,
+    total_focus_hours = 0,
+    total_sessions = 0,
+    current_streak = 0,
+    unlocked_achievements_count = 0,
+    total_achievements_count = 12,
+    achievements = [],
+    recent_activity = [],
+  } = activeProgression;
+
+  const safePercent = Math.min(100, Math.max(0, Number(progress_percent) || 0));
+  const fillWidth = current_level_xp > 0 ? Math.max(3, safePercent) : 0;
+  const badge = (rank_badge || "bronze").toLowerCase();
+
+  const filteredAchievements = achievements.filter((a) => {
+    if (categoryFilter === "All") return true;
+    if (categoryFilter === "Unlocked") return a.unlocked;
+    if (categoryFilter === "Locked") return !a.unlocked;
+    return a.category === categoryFilter;
+  });
+
+  return (
+    <div style={{ display: "grid", gap: 24 }}>
+      {/* Premium Hero Progression Card */}
+      <section className="progression-hero-card">
+        <div className="progression-hero-main">
+          <div className="progression-avatar-wrap">
+            <div className="progression-avatar">{user.name.trim().charAt(0).toUpperCase()}</div>
+            <div className={`progression-avatar-rank rank-crest rank-${badge}`}>
+              <Icon name="award" size={16} />
+            </div>
+          </div>
+
+          <div className="progression-user-meta">
+            <div className="progression-user-header">
+              <h2 className="progression-user-name">{user.name}</h2>
+              <span className={`rank-chip rank-${badge}`}>{rank_tier} Tier</span>
+              <span className="level-chip">Level {current_level}</span>
+            </div>
+            <p className="progression-user-email">{user.email} · {rank_description}</p>
+
+            <div className="progression-title-row">
+              <h3>{level_title}</h3>
+            </div>
+
+            <div className="progression-hero-bar">
+              <div className="progression-hero-bar-meta">
+                <span>
+                  <b>{current_level_xp}</b> / {next_level_xp} XP to Level {current_level + 1}
+                </span>
+                <span>
+                  <b>{Math.round(safePercent)}%</b> ({total_xp} Total XP)
+                </span>
+              </div>
+              <div className="progression-hero-bar-track">
+                <div
+                  className={`progression-hero-bar-fill xp-progress-fill rank-fill-${badge}`}
+                  style={{ width: `${fillWidth}%` }}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Core Matrix Stats */}
+        <div className="progression-matrix">
+          <div className="progression-matrix-card">
+            <div className="progression-matrix-icon blue">
+              <Icon name="trend" size={20} />
+            </div>
+            <div>
+              <strong>{total_focus_hours}h</strong>
+              <span>Focus Hours Completed</span>
+            </div>
+          </div>
+
+          <div className="progression-matrix-card">
+            <div className="progression-matrix-icon orange">
+              <Icon name="focus" size={20} />
+            </div>
+            <div>
+              <strong>{total_sessions}</strong>
+              <span>Completed Sessions</span>
+            </div>
+          </div>
+
+          <div className="progression-matrix-card">
+            <div className="progression-matrix-icon red">
+              <Icon name="flame" size={20} />
+            </div>
+            <div>
+              <strong>{current_streak} {current_streak === 1 ? "day" : "days"}</strong>
+              <span>Productivity Streak</span>
+            </div>
+          </div>
+
+          <div className="progression-matrix-card">
+            <div className="progression-matrix-icon purple">
+              <Icon name="trophy" size={20} />
+            </div>
+            <div>
+              <strong>{unlocked_achievements_count} / {total_achievements_count}</strong>
+              <span>Badges Unlocked</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Navigation Sub-Tabs */}
+      <div className="panel">
+        <div className="achievements-tabs-row">
+          <div className="filter-pill-group">
+            <button
+              className={`filter-pill ${tab === "achievements" ? "active" : ""}`}
+              onClick={() => setTab("achievements")}
+            >
+              Achievements & Badges ({unlocked_achievements_count}/{total_achievements_count})
+            </button>
+            <button
+              className={`filter-pill ${tab === "ranks" ? "active" : ""}`}
+              onClick={() => setTab("ranks")}
+            >
+              Rank Tiers & Prestige
+            </button>
+            <button
+              className={`filter-pill ${tab === "activity" ? "active" : ""}`}
+              onClick={() => setTab("activity")}
+            >
+              Recent XP Ledger
+            </button>
+          </div>
+
+          {tab === "achievements" && (
+            <div className="filter-pill-group">
+              {["All", "Unlocked", "Locked", "Focus", "Tasks", "Consistency", "Discipline"].map((cat) => (
+                <button
+                  key={cat}
+                  className={`filter-pill ${categoryFilter === cat ? "active" : ""}`}
+                  onClick={() => setCategoryFilter(cat)}
+                  style={{ fontSize: 11, padding: "4px 10px" }}
+                >
+                  {cat}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Tab 1: Achievements Grid */}
+        {tab === "achievements" && (
+          <div className="achievements-grid">
+            {filteredAchievements.map((ach) => (
+              <article
+                key={ach.id}
+                className={`achievement-card ${ach.unlocked ? "unlocked" : "locked"}`}
+              >
+                <div className="ach-card-top">
+                  <div className="ach-icon-box">
+                    <Icon name={ach.unlocked ? ach.icon || "award" : "lock"} size={22} />
+                  </div>
+                  <div className="ach-badges-row">
+                    <span className="ach-category-tag">{ach.category}</span>
+                    <span className="ach-reward-tag">+{ach.xp_reward} XP</span>
+                  </div>
+                </div>
+
+                <div className="ach-card-info">
+                  <b>{ach.name}</b>
+                  <p>{ach.description}</p>
+                </div>
+
+                <div className="ach-requirement">
+                  <small>Requirement: {ach.requirement}</small>
+                </div>
+
+                {!ach.unlocked && ach.target > 1 && (
+                  <div style={{ marginTop: 2 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--text-muted)", marginBottom: 4 }}>
+                      <span>Progress</span>
+                      <span>{ach.current_progress} / {ach.target}</span>
+                    </div>
+                    <div className="mini-progress-track" style={{ width: "100%" }}>
+                      <div
+                        className="mini-progress-fill"
+                        style={{
+                          width: `${Math.min(100, Math.round((ach.current_progress / ach.target) * 100))}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <div className="ach-card-footer">
+                  {ach.unlocked ? (
+                    <span className="ach-unlocked-status">
+                      <Icon name="check" size={13} />
+                      <span>Unlocked {formatDate(ach.unlocked_at)}</span>
+                    </span>
+                  ) : (
+                    <span className="ach-locked-status">
+                      <Icon name="lock" size={12} />
+                      <span>Locked</span>
+                    </span>
+                  )}
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+
+        {/* Tab 2: Rank Tiers Roadmap */}
+        {tab === "ranks" && (
+          <div>
+            <p className="muted" style={{ marginBottom: 16 }}>
+              Climb through the ranks by earning XP through genuine focus sessions, completed tasks,
+              and daily consistency. Each tier unlocks greater prestige and distinction.
+            </p>
+            <div className="rank-roadmap-grid">
+              {[
+                { name: "Bronze", badge: "bronze", xp: "0 - 499 XP", desc: "Foundation of Focus" },
+                { name: "Silver", badge: "silver", xp: "500 - 1,499 XP", desc: "Consistent Striver" },
+                { name: "Gold", badge: "gold", xp: "1,500 - 3,499 XP", desc: "Deep Worker" },
+                { name: "Platinum", badge: "platinum", xp: "3,500 - 6,999 XP", desc: "Master of Flow" },
+                { name: "Diamond", badge: "diamond", xp: "7,000 - 11,999 XP", desc: "Relentless Discipline" },
+                { name: "Master", badge: "master", xp: "12,000+ XP", desc: "Zenith of Productivity" },
+              ].map((tier) => {
+                const isCurrent = rank_tier.toLowerCase() === tier.name.toLowerCase();
+                return (
+                  <div
+                    key={tier.name}
+                    className={`rank-tier-card ${isCurrent ? "is-current" : ""}`}
+                  >
+                    {isCurrent && <span className="current-rank-marker">Current Rank</span>}
+                    <div className={`rank-crest rank-${tier.badge}`} style={{ width: 50, height: 50 }}>
+                      <Icon name="award" size={24} />
+                    </div>
+                    <b>{tier.name}</b>
+                    <span className="rank-tier-xp-badge">{tier.xp}</span>
+                    <small>{tier.desc}</small>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Tab 3: Recent Activity Ledger */}
+        {tab === "activity" && (
+          <div>
+            <p className="muted" style={{ marginBottom: 16 }}>
+              Verifiable log of XP earned from genuine focus sessions, tasks, and consistency streaks.
+            </p>
+            {!recent_activity.length ? (
+              <div className="empty">
+                <div className="empty-icon"><Icon name="trend" size={22} /></div>
+                <b>No recent XP activities recorded yet</b>
+                <p>Complete a focus block or task to earn your first XP points.</p>
+              </div>
+            ) : (
+              <div className="activity-ledger-list">
+                {recent_activity.map((item) => (
+                  <div className="activity-ledger-item" key={item.id}>
+                    <div className="activity-ledger-main">
+                      <div className="activity-ledger-icon">
+                        <Icon
+                          name={
+                            item.activity_type === "session"
+                              ? "focus"
+                              : item.activity_type === "task"
+                                ? "check"
+                                : item.activity_type === "daily_streak"
+                                  ? "flame"
+                                  : item.activity_type === "achievement"
+                                    ? "award"
+                                    : "zap"
+                          }
+                          size={16}
+                        />
+                      </div>
+                      <div>
+                        <b>{item.description}</b>
+                        <small>{formatDate(item.created_at)}</small>
+                      </div>
+                    </div>
+                    <span className="activity-ledger-xp">+{item.amount} XP</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ==================== PROFILE MODAL DIALOG ==================== */
+function ProfileModal({ user, progression, onClose, onLogout }) {
+  return (
+    <div className="profile-modal-backdrop" onClick={onClose}>
+      <div className="profile-modal-card" onClick={(e) => e.stopPropagation()}>
+        <div className="profile-modal-top">
+          <h2>User Profile & Progression</h2>
+          <button className="profile-modal-close" onClick={onClose} aria-label="Close modal">
+            ×
+          </button>
+        </div>
+
+        <ProgressionSection
+          user={user}
+          progression={progression}
+          onOpenProfileModal={() => { }}
+        />
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, paddingTop: 16, borderTop: "1px solid var(--border-subtle)" }}>
+          <button className="secondary sm" onClick={onClose}>
+            Close
+          </button>
+          <button className="icon-action danger" onClick={onLogout} title="Log out of account" style={{ width: "auto", padding: "6px 14px", display: "inline-flex", gap: 6 }}>
+            <Icon name="logout" size={14} />
+            <span>Log out</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+/* ==================== GEMINI / CHATGPT STYLE AI ASSISTANT ==================== */
+function AIAssistantChat({
+  user,
+  tasks,
+  sessions,
+  habits,
+  progression,
+  onStartFocusTask,
+  onToggleTask,
+  onAddTaskDirect,
+  addToast,
+}) {
+  const [messages, setMessages] = useState(() => {
+    try {
+      return JSON.parse(
+        localStorage.getItem(`ff-ai-messages-${user?.id || "guest"}`) || "[]"
+      );
+    } catch {
+      return [];
+    }
+  });
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [aiConfig, setAiConfig] = useState({
+    has_key: false,
+    masked_key: "",
+    models: [],
+    recommended_model: "gemini-3.5-flash-lite",
+  });
+  const [selectedModel, setSelectedModel] = useState(() => {
+    const saved = localStorage.getItem("ff-ai-model");
+    if (
+      !saved ||
+      saved.includes("2.5-flash") ||
+      saved.includes("1.5-flash") ||
+      saved.includes("2.0-flash")
+    ) {
+      return "gemini-3.5-flash-lite";
+    }
+    return saved;
+  });
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [addedCardTitles, setAddedCardTitles] = useState({});
+  const messagesEndRef = React.useRef(null);
+
+  // Sync messages to localStorage
+  useEffect(() => {
+    if (user) {
+      localStorage.setItem(
+        `ff-ai-messages-${user.id || "guest"}`,
+        JSON.stringify(messages)
+      );
+    }
+  }, [messages, user]);
+
+  // Load AI configuration
+  const loadConfig = useCallback(async () => {
+    try {
+      const data = await api("/ai/config");
+      setAiConfig(data);
+      const saved = localStorage.getItem("ff-ai-model");
+      const isDeprecated =
+        !saved ||
+        saved.includes("2.5-flash") ||
+        saved.includes("1.5-flash") ||
+        saved.includes("2.0-flash");
+      if ((isDeprecated || !saved) && data.recommended_model) {
+        setSelectedModel(data.recommended_model);
+        localStorage.setItem("ff-ai-model", data.recommended_model);
+      }
+    } catch (e) {
+      console.warn("Could not load AI config", e);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadConfig();
+  }, [loadConfig]);
+
+  // Scroll to bottom
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, loading]);
+
+  async function handleSend(promptText = input) {
+    const text = (promptText || "").trim();
+    if (!text || loading) return;
+
+    const userMsg = { role: "user", content: text };
+    const updatedMessages = [...messages, userMsg];
+    setMessages(updatedMessages);
+    setInput("");
+    setLoading(true);
+
+    try {
+      const data = await api("/ai/chat", {
+        method: "POST",
+        body: JSON.stringify({
+          messages: updatedMessages,
+          model: selectedModel,
+        }),
+      });
+
+      const assistantMsg = {
+        role: "model",
+        content: data.reply,
+        cards: data.cards || [],
+        model_used: data.model_used,
+      };
+
+      setMessages((prev) => [...prev, assistantMsg]);
+
+      if (data.needs_key) {
+        setSettingsOpen(true);
+      }
+    } catch (err) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "model",
+          content: `⚠️ **Error**: ${err.message}. Please check your connection or Gemini API key.`,
+          cards: [],
+        },
+      ]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function handleKeyDown(e) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  }
+
+  function clearChat() {
+    if (window.confirm("Clear this conversation history?")) {
+      setMessages([]);
+      localStorage.removeItem(`ff-ai-messages-${user?.id || "guest"}`);
+    }
+  }
+
+  const starterCards = [
+    {
+      id: "prioritize",
+      icon: "target",
+      tone: "purple",
+      title: "What should I prioritize right now?",
+      desc: "Analyze my deadlines and high-priority tasks to suggest the best start.",
+      prompt: "What task should I focus on right now based on my deadlines, priorities, and current focus history?",
+    },
+    {
+      id: "pomodoro",
+      icon: "focus",
+      tone: "orange",
+      title: "Plan a 2-hour Pomodoro study block",
+      desc: "Structure 25-minute deep focus sessions and breaks around my active tasks.",
+      prompt: "Create a 2-hour Pomodoro study plan for me. Break down my pending tasks into 25-minute focus blocks and 5-minute breaks.",
+    },
+    {
+      id: "breakdown",
+      icon: "zap",
+      tone: "green",
+      title: "Break down my hardest task",
+      desc: "Divide my high-priority assignment into smaller, actionable sub-steps.",
+      prompt: "Take my highest-priority task and break it down into 3 or 4 actionable sub-tasks with estimated minutes for each.",
+    },
+    {
+      id: "streak",
+      icon: "trend",
+      tone: "blue",
+      title: "Analyze my productivity & habits",
+      desc: "Evaluate my consistency, XP progress, and how to reach the next milestone.",
+      prompt: "Analyze my recent productivity, current streak, and habits. How can I stay consistent and reach my next level faster?",
+    },
+  ];
+
+  const pendingCount = tasks.filter((t) => !t.completed).length;
+
+  return (
+    <div className="ai-chat-shell">
+      {/* Settings Modal */}
+      {settingsOpen && (
+        <AISettingsModal
+          aiConfig={aiConfig}
+          selectedModel={selectedModel}
+          onSelectModel={(m) => {
+            setSelectedModel(m);
+            localStorage.setItem("ff-ai-model", m);
+          }}
+          onSaveKey={async (key) => {
+            const res = await api("/ai/config", {
+              method: "POST",
+              body: JSON.stringify({ api_key: key }),
+            });
+            setAiConfig(res);
+            if (res.recommended_model) {
+              setSelectedModel(res.recommended_model);
+              localStorage.setItem("ff-ai-model", res.recommended_model);
+            }
+            addToast({
+              type: "xp",
+              title: "Gemini API Connected!",
+              message: `Active model set to ${res.recommended_model} (Low Credit usage).`,
+              icon: "sparkle",
+            });
+            setSettingsOpen(false);
+          }}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
+
+      {/* Header Bar */}
+      <div className="ai-chat-header">
+        <div className="ai-header-left">
+          <div className="ai-avatar-orb">
+            <Icon name="sparkle" size={18} />
+          </div>
+          <div className="ai-header-info">
+            <h2>
+              <span>FocusFlow AI Assistant</span>
+            </h2>
+            <p>
+              Grounded in {pendingCount} tasks · {progression?.current_streak || 0}-day streak · Level{" "}
+              {progression?.current_level || 1} ({progression?.rank_tier || "Bronze"})
+            </p>
+          </div>
+        </div>
+
+        <div className="ai-header-actions">
+          <button
+            className="ai-model-pill"
+            onClick={() => setSettingsOpen(true)}
+            title="Click to change model or view credit usage"
+          >
+            <Icon name="sparkle" size={13} />
+            <span>{selectedModel}</span>
+          </button>
+
+          <button
+            className={`ai-key-btn ${aiConfig.has_key ? "has-key" : "needs-key"}`}
+            onClick={() => setSettingsOpen(true)}
+          >
+            <Icon name="key" size={13} />
+            <span>{aiConfig.has_key ? "Gemini Key Connected" : "Connect Gemini Key"}</span>
+          </button>
+
+          {messages.length > 0 && (
+            <button
+              className="icon-action"
+              onClick={clearChat}
+              title="Clear conversation"
+              aria-label="Clear conversation"
+            >
+              <Icon name="trash" size={14} />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Chat Body */}
+      <div className="ai-chat-body">
+        {messages.length === 0 ? (
+          <div className="ai-welcome-box">
+            <div className="ai-welcome-orb">
+              <Icon name="sparkle" size={28} />
+            </div>
+            <h2>How can I assist your study flow today?</h2>
+            <p>
+              I am your personal productivity assistant powered by Google Gemini. I have real-time
+              access to your tasks, focus sessions, and habit consistency to give you practical,
+              actionable guidance.
+            </p>
+            <div className="ai-context-chip">
+              <Icon name="checkCircle" size={14} />
+              <span>
+                {pendingCount} active tasks · {sessions.length} focus sessions logged
+              </span>
+            </div>
+
+            {/* Starter Prompt Cards */}
+            <div className="ai-starter-grid">
+              {starterCards.map((card) => (
+                <div
+                  key={card.id}
+                  className="ai-starter-card"
+                  onClick={() => handleSend(card.prompt)}
+                >
+                  <div className={`ai-starter-icon ${card.tone}`}>
+                    <Icon name={card.icon} size={18} />
+                  </div>
+                  <div className="ai-starter-copy">
+                    <b>{card.title}</b>
+                    <span>{card.desc}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          messages.map((msg, index) => (
+            <div key={index} className={`ai-message-row ${msg.role === "user" ? "user" : "assistant"}`}>
+              <div className="ai-msg-avatar">
+                {msg.role === "user" ? (
+                  user?.name?.trim().charAt(0).toUpperCase() || "U"
+                ) : (
+                  <Icon name="sparkle" size={16} />
+                )}
+              </div>
+
+              <div className="ai-msg-content">
+                <div className="ai-bubble">
+                  {msg.role === "user" ? msg.content : renderMarkdown(msg.content)}
+                </div>
+                {msg.role !== "user" && msg.model_used && (
+                  <div className="ai-model-attribution">
+                    <Icon name="sparkle" size={11} />
+                    <span>Answered by {msg.model_used}</span>
+                  </div>
+                )}
+
+                {/* Task Cards rendered under assistant response */}
+                {msg.cards && msg.cards.length > 0 && (
+                  <div className="ai-cards-group">
+                    {msg.cards.map((card, cIdx) => {
+                      const isAdded = addedCardTitles[card.title];
+                      return (
+                        <div
+                          key={cIdx}
+                          className={`ai-task-card ${card.type === "new_task_suggestion" ? "new-task" : ""
+                            }`}
+                        >
+                          <div className="ai-task-card-main">
+                            <div className="ai-task-card-header">
+                              <span className="ach-category-tag">
+                                {card.type === "new_task_suggestion" ? "Suggested Task" : card.category}
+                              </span>
+                              <span
+                                className={`priority ${(card.priority || "Medium").toLowerCase()}`}
+                                style={{ fontSize: 10, padding: "2px 7px" }}
+                              >
+                                {card.priority}
+                              </span>
+                            </div>
+                            <b>{card.title}</b>
+                            <div className="ai-task-card-meta">
+                              <span>⏱️ {card.estimated_minutes} min focus</span>
+                              {card.due_date && <span>📅 Due {card.due_date}</span>}
+                            </div>
+                          </div>
+
+                          <div className="ai-task-card-actions">
+                            {card.type === "existing_task" ? (
+                              <>
+                                <button
+                                  className="primary sm btn-with-icon"
+                                  onClick={() => onStartFocusTask(card)}
+                                  title="Start a focus timer for this task"
+                                >
+                                  <Icon name="play" size={13} />
+                                  <span>Start Focus</span>
+                                </button>
+                                {!card.completed && (
+                                  <button
+                                    className="secondary sm btn-with-icon"
+                                    onClick={() => onToggleTask(card)}
+                                    title="Complete this task (+10 XP)"
+                                  >
+                                    <Icon name="check" size={13} />
+                                    <span>Complete (+10 XP)</span>
+                                  </button>
+                                )}
+                              </>
+                            ) : (
+                              <button
+                                className="primary sm btn-with-icon"
+                                disabled={isAdded}
+                                onClick={async () => {
+                                  const success = await onAddTaskDirect(card);
+                                  if (success) {
+                                    setAddedCardTitles((prev) => ({ ...prev, [card.title]: true }));
+                                  }
+                                }}
+                              >
+                                <Icon name={isAdded ? "check" : "plus"} size={13} />
+                                <span>{isAdded ? "Added to Workspace ✓" : "+ Add to Tasks"}</span>
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          ))
+        )}
+
+        {loading && (
+          <div className="ai-message-row assistant">
+            <div className="ai-msg-avatar">
+              <Icon name="sparkle" size={16} />
+            </div>
+            <div className="ai-typing-indicator">
+              <span className="ai-dot" />
+              <span className="ai-dot" />
+              <span className="ai-dot" />
+            </div>
+          </div>
+        )}
+
+        <div ref={messagesEndRef} />
+      </div>
+
+      {/* Input Bar */}
+      <div className="ai-input-wrap">
+        <form
+          className="ai-input-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            handleSend();
+          }}
+        >
+          <input
+            className="ai-input-field"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Ask FocusFlow AI about your priorities, study schedule, or breakdown of tasks..."
+            disabled={loading}
+          />
+          <button
+            type="submit"
+            className="ai-send-btn"
+            disabled={!input.trim() || loading}
+            aria-label="Send message"
+          >
+            <Icon name="send" size={16} />
+          </button>
+        </form>
+        <div className="ai-input-foot">
+          <span>🔒 Grounded in your private workspace data</span>
+          <span>Powered by Google Gemini · Low Credit Usage</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ==================== AI SETTINGS & MODEL SELECTION MODAL ==================== */
+function AISettingsModal({ aiConfig, selectedModel, onSelectModel, onSaveKey, onClose }) {
+  const [apiKey, setApiKey] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handleSaveKey(e) {
+    e.preventDefault();
+    if (!apiKey.trim()) return;
+    setSaving(true);
+    setError("");
+    try {
+      await onSaveKey(apiKey.trim());
+    } catch (err) {
+      setError(err.message || "Failed to verify Gemini API Key.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="profile-modal-backdrop" onClick={onClose}>
+      <div
+        className="profile-modal-card ai-settings-dialog"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="profile-modal-top">
+          <h2>Google Gemini Configuration</h2>
+          <button className="profile-modal-close" onClick={onClose} aria-label="Close dialog">
+            ×
+          </button>
+        </div>
+
+        <form onSubmit={handleSaveKey} className="ai-modal-section">
+          <label>
+            Gemini API Key
+            <input
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder={aiConfig.has_key ? `Connected (${aiConfig.masked_key})` : "Paste your Gemini API key (AIzaSy...)"}
+              required={!aiConfig.has_key}
+            />
+          </label>
+          <p className="ai-key-hint">
+            Get your free Gemini API key in 30 seconds at{" "}
+            <a
+              href="https://aistudio.google.com/app/apikey"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Google AI Studio
+            </a>
+            . Your key is stored securely in your private workspace.
+          </p>
+
+          {error && <div className="error">{error}</div>}
+
+          <div style={{ display: "flex", gap: 10 }}>
+            <button className="primary sm btn-with-icon" type="submit" disabled={saving || !apiKey.trim()}>
+              <Icon name="key" size={14} />
+              <span>{saving ? "Verifying & Discovering Models…" : "Save & Verify Key"}</span>
+            </button>
+          </div>
+        </form>
+
+        <div className="ai-modal-section" style={{ borderTop: "1px solid var(--border-subtle)", paddingTop: 16 }}>
+          <b>Available Gemini Models (Lowest Credit Usage Prioritized)</b>
+          <p className="muted" style={{ fontSize: 12 }}>
+            We automatically select Flash models for minimal credit consumption and instant responses.
+          </p>
+
+          <div className="ai-model-list">
+            {(aiConfig.models && aiConfig.models.length > 0
+              ? aiConfig.models
+              : [
+                { id: "gemini-3.5-flash-lite", display_name: "Gemini 3.5 Flash Lite", credit_tier: "Ultra Low Credit (Flash-Lite)" },
+                { id: "gemini-flash-lite-latest", display_name: "Gemini Flash-Lite Latest", credit_tier: "Ultra Low Credit (Flash-Lite)" },
+                { id: "gemini-3.8-flash", display_name: "Gemini 3.8 Flash", credit_tier: "Low Credit (Latest Flash)" },
+                { id: "gemini-3.5-flash", display_name: "Gemini 3.5 Flash", credit_tier: "Low Credit" },
+                { id: "gemini-2.5-pro", display_name: "Gemini 2.5 Pro", credit_tier: "Higher Credit (Pro)" },
+              ]
+            ).map((m) => {
+              const isSelected = selectedModel === m.id;
+              return (
+                <div
+                  key={m.id}
+                  className={`ai-model-option ${isSelected ? "selected" : ""}`}
+                  onClick={() => onSelectModel(m.id)}
+                >
+                  <div className="ai-model-opt-info">
+                    <b>{m.display_name || m.id}</b>
+                    <small>{m.id}</small>
+                  </div>
+                  <span className="ai-tier-tag">{m.credit_tier || "Standard"}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+          <button className="secondary sm" onClick={onClose}>
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ==================== MARKDOWN RENDERER ==================== */
+function renderMarkdown(text) {
+  if (!text) return null;
+  const lines = text.split("\n");
+  const elements = [];
+  let listItems = [];
+
+  const flushList = (key) => {
+    if (listItems.length > 0) {
+      elements.push(
+        <ul key={`ul-${key}`}>
+          {listItems.map((item, idx) => (
+            <li key={idx} dangerouslySetInnerHTML={{ __html: formatInline(item) }} />
+          ))}
+        </ul>
+      );
+      listItems = [];
+    }
+  };
+
+  const formatInline = (str) => {
+    return str
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
+      .replace(/\*(.*?)\*/g, "<em>$1</em>")
+      .replace(/`([^`]+)`/g, "<code>$1</code>");
+  };
+
+  lines.forEach((line, i) => {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
+      listItems.push(trimmed.slice(2));
+    } else if (/^\d+\.\s/.test(trimmed)) {
+      listItems.push(trimmed.replace(/^\d+\.\s/, ""));
+    } else {
+      flushList(i);
+      if (trimmed.startsWith("### ")) {
+        elements.push(<h4 key={i}>{trimmed.slice(4)}</h4>);
+      } else if (trimmed.startsWith("## ")) {
+        elements.push(<h3 key={i}>{trimmed.slice(3)}</h3>);
+      } else if (trimmed) {
+        elements.push(
+          <p key={i} dangerouslySetInnerHTML={{ __html: formatInline(trimmed) }} />
+        );
+      }
+    }
+  });
+  flushList("end");
+  return elements;
 }

@@ -1,3 +1,5 @@
+import os
+import re
 from datetime import datetime, timezone
 import sqlite3
 from pathlib import Path
@@ -6,30 +8,127 @@ from flask import Flask, jsonify, request, session
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 
-app = Flask(__name__)
-app.config.update(SECRET_KEY="focusflow-local-development-key-change-before-deployment", SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax")
-CORS(app, supports_credentials=True, resources={r"/api/*": {"origins": ["http://localhost:5173", "http://127.0.0.1:5173"]}})
-DB = Path(__file__).with_name("focusflow.db")
+from database import connect, init_database, USE_POSTGRES, NEON_DATABASE_URL
+from gamification import (
+    calculate_session_xp,
+    award_xp,
+    update_user_streak_and_award_bonus,
+    check_weekly_focus_goal_bonus,
+    check_and_unlock_achievements,
+    get_user_progression_summary,
+    get_or_init_progression,
+    XP_PER_TASK,
+)
+from ai_assistant import (
+    get_api_key,
+    save_api_key,
+    fetch_gemini_models,
+    generate_chat_response,
+)
 
-def connect():
-    db = sqlite3.connect(DB)
-    db.row_factory = sqlite3.Row
-    return db
+app = Flask(__name__)
+
+# Session Cookie Configuration:
+# In cross-origin environments (e.g. frontend on vercel or localhost talking to backend on vercel),
+# browsers require SameSite=None and Secure=True to transmit session cookies with credentials: 'include'.
+is_vercel = bool(os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
+cookie_samesite = os.environ.get("SESSION_COOKIE_SAMESITE", "None" if is_vercel else "Lax")
+cookie_secure = (
+    os.environ.get("SESSION_COOKIE_SECURE", "true" if is_vercel else "false").lower() in ("true", "1")
+)
+
+app.config.update(
+    SECRET_KEY=os.environ.get("SECRET_KEY", "focusflow-production-secret-key-replace-if-needed"),
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE=cookie_samesite,
+    SESSION_COOKIE_SECURE=cookie_secure,
+)
+
+# Setup CORS with Flask-CORS
+# By allowing pattern r".*", Flask-CORS echoes the exact requesting Origin back
+# with Access-Control-Allow-Credentials: true, complying with W3C Fetch spec.
+CORS(
+    app,
+    supports_credentials=True,
+    resources={r"/*": {"origins": r".*"}},
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept", "Cookie"],
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    expose_headers=["Content-Type", "Set-Cookie"],
+)
+
+
+@app.before_request
+def handle_options_preflight():
+    """Immediately return 200 OK with full CORS headers on preflight OPTIONS requests."""
+    if request.method == "OPTIONS":
+        origin = request.headers.get("Origin") or "*"
+        res = app.make_default_options_response()
+        res.headers["Access-Control-Allow-Origin"] = origin
+        res.headers["Access-Control-Allow-Credentials"] = "true"
+        res.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+        res.headers["Access-Control-Allow-Headers"] = (
+            request.headers.get("Access-Control-Request-Headers")
+            or "Content-Type, Authorization, X-Requested-With, Accept, Cookie"
+        )
+        res.headers["Access-Control-Max-Age"] = "86400"
+        return res
+
+
+@app.after_request
+def ensure_cors_headers(response):
+    """Guarantees CORS headers are attached on all responses, including errors and custom codes."""
+    origin = request.headers.get("Origin")
+    if origin:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = (
+            "Content-Type, Authorization, X-Requested-With, Accept, Cookie"
+        )
+    return response
+
 
 def init_db():
-    with connect() as db:
-        db.execute("""CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL, created_at TEXT NOT NULL)""")
-        db.execute("""CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, category TEXT NOT NULL DEFAULT 'Study', priority TEXT NOT NULL DEFAULT 'Medium', due_date TEXT NOT NULL DEFAULT '', estimated_minutes INTEGER NOT NULL DEFAULT 30, completed INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, user_id INTEGER REFERENCES users(id))""")
-        db.execute("""CREATE TABLE IF NOT EXISTS sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, duration_minutes INTEGER NOT NULL, completed_at TEXT NOT NULL, user_id INTEGER REFERENCES users(id))""")
-        for table in ("tasks", "sessions"):
-            cols = {r["name"] for r in db.execute(f"PRAGMA table_info({table})")}
-            if "user_id" not in cols:
-                db.execute(f"ALTER TABLE {table} ADD COLUMN user_id INTEGER REFERENCES users(id)")
-        db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks(user_id)")
-        db.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
+    init_database()
+    try:
+        with connect() as db:
+            existing_users = db.execute("SELECT id FROM users").fetchall()
+            for u in existing_users:
+                get_or_init_progression(db, u["id"])
+                check_and_unlock_achievements(db, u["id"])
+            db.commit()
+    except Exception as e:
+        print(f"[FocusFlow DB] Notice during progression init: {e}")
+
+
+# Call init_db on module import so tables exist even when running under serverless / WSGI
+try:
+    init_db()
+except Exception as e:
+    print(f"[FocusFlow DB] Startup initialization notice: {e}")
+
+
+@app.get("/")
+def index():
+    return jsonify({
+        "name": "FocusFlow API",
+        "status": "online",
+        "database": "Neon PostgreSQL" if USE_POSTGRES else "SQLite",
+        "endpoints": {
+            "health": "/api/health",
+            "auth": "/api/auth/me",
+            "tasks": "/api/tasks",
+            "sessions": "/api/sessions",
+            "progression": "/api/progression",
+            "achievements": "/api/achievements",
+            "ai": "/api/ai/chat"
+        }
+    })
+
 
 def user_payload(row):
     return {"id": row["id"], "name": row["name"], "email": row["email"]}
+
 
 def login_required(fn):
     @wraps(fn)
@@ -37,16 +136,21 @@ def login_required(fn):
         if not session.get("user_id"):
             return jsonify({"error": "Please log in to continue."}), 401
         return fn(*args, **kwargs)
+
     return wrapped
+
 
 def task_dict(row):
     data = dict(row)
     data["completed"] = bool(data["completed"])
+    data["xp_awarded"] = bool(data.get("xp_awarded", 0))
     return data
+
 
 @app.get("/api/health")
 def health():
     return jsonify({"status": "ok", "message": "FocusFlow API is running"})
+
 
 @app.get("/api/auth/me")
 def current_user():
@@ -60,110 +164,358 @@ def current_user():
         return jsonify({"user": None})
     return jsonify({"user": user_payload(row)})
 
+
 @app.post("/api/auth/register")
 def register():
     data = request.get_json(silent=True) or {}
-    name, email, password = str(data.get("name", "")).strip(), str(data.get("email", "")).strip().lower(), str(data.get("password", ""))
+    name = str(data.get("name", "")).strip()
+    email = str(data.get("email", "")).strip().lower()
+    password = str(data.get("password", ""))
+
     if not 2 <= len(name) <= 60:
         return jsonify({"error": "Name must be between 2 and 60 characters."}), 400
     if "@" not in email or len(email) > 120:
         return jsonify({"error": "Enter a valid email address."}), 400
     if len(password) < 8:
         return jsonify({"error": "Password must contain at least 8 characters."}), 400
+
     try:
         with connect() as db:
-            cur = db.execute("INSERT INTO users(name,email,password_hash,created_at) VALUES(?,?,?,?)", (name, email, generate_password_hash(password), datetime.now(timezone.utc).isoformat()))
+            cur = db.execute(
+                "INSERT INTO users(name,email,password_hash,created_at) VALUES(?,?,?,?)",
+                (name, email, generate_password_hash(password), datetime.now(timezone.utc).isoformat()),
+            )
             uid = cur.lastrowid
             if db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1:
                 db.execute("UPDATE tasks SET user_id=? WHERE user_id IS NULL", (uid,))
                 db.execute("UPDATE sessions SET user_id=? WHERE user_id IS NULL", (uid,))
+            # Initialize user progression
+            get_or_init_progression(db, uid)
             row = db.execute("SELECT id,name,email FROM users WHERE id=?", (uid,)).fetchone()
     except sqlite3.IntegrityError:
         return jsonify({"error": "An account with this email already exists. Please log in."}), 409
-    session.clear(); session["user_id"] = uid
+
+    session.clear()
+    session["user_id"] = uid
     return jsonify({"user": user_payload(row)}), 201
+
 
 @app.post("/api/auth/login")
 def login():
     data = request.get_json(silent=True) or {}
-    email, password = str(data.get("email", "")).strip().lower(), str(data.get("password", ""))
+    email = str(data.get("email", "")).strip().lower()
+    password = str(data.get("password", ""))
+
     with connect() as db:
         row = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
-    if row is None or not check_password_hash(row["password_hash"], password):
-        return jsonify({"error": "Incorrect email or password."}), 401
-    session.clear(); session["user_id"] = row["id"]
+        if row is None or not check_password_hash(row["password_hash"], password):
+            return jsonify({"error": "Incorrect email or password."}), 401
+        # Ensure progression row and sync
+        get_or_init_progression(db, row["id"])
+        check_and_unlock_achievements(db, row["id"])
+
+    session.clear()
+    session["user_id"] = row["id"]
     return jsonify({"user": user_payload(row)})
+
 
 @app.post("/api/auth/logout")
 def logout():
     session.clear()
     return jsonify({"message": "Logged out."})
 
+
 @app.get("/api/tasks")
 @login_required
 def list_tasks():
     with connect() as db:
-        rows = db.execute("SELECT * FROM tasks WHERE user_id=? ORDER BY completed ASC, id DESC", (session["user_id"],)).fetchall()
+        rows = db.execute(
+            "SELECT * FROM tasks WHERE user_id=? ORDER BY completed ASC, id DESC",
+            (session["user_id"],),
+        ).fetchall()
     return jsonify({"tasks": [task_dict(r) for r in rows]})
+
 
 @app.post("/api/tasks")
 @login_required
 def add_task():
     data = request.get_json(silent=True) or {}
     title = str(data.get("title", "")).strip()
-    if not title: return jsonify({"error": "Task title is required."}), 400
-    if len(title) > 120: return jsonify({"error": "Task title must be 120 characters or fewer."}), 400
-    category = str(data.get("category", "Study")); priority = str(data.get("priority", "Medium"))
-    if category not in {"Study", "Assignment", "Exam preparation", "Personal", "Project"}: category = "Study"
-    if priority not in {"High", "Medium", "Low"}: priority = "Medium"
+    if not title:
+        return jsonify({"error": "Task title is required."}), 400
+    if len(title) > 120:
+        return jsonify({"error": "Task title must be 120 characters or fewer."}), 400
+
+    category = str(data.get("category", "Study"))
+    priority = str(data.get("priority", "Medium"))
+    if category not in {"Study", "Assignment", "Exam preparation", "Personal", "Project"}:
+        category = "Study"
+    if priority not in {"High", "Medium", "Low"}:
+        priority = "Medium"
+
     due_date = str(data.get("due_date", ""))[:10]
-    try: minutes = max(1, min(1440, int(data.get("estimated_minutes", 30))))
-    except (ValueError, TypeError): minutes = 30
+    try:
+        minutes = max(1, min(1440, int(data.get("estimated_minutes", 30))))
+    except (ValueError, TypeError):
+        minutes = 30
+
     created = datetime.now(timezone.utc).isoformat()
     with connect() as db:
-        cur = db.execute("INSERT INTO tasks(title,category,priority,due_date,estimated_minutes,completed,created_at,user_id) VALUES(?,?,?,?,?,0,?,?)", (title,category,priority,due_date,minutes,created,session["user_id"]))
+        cur = db.execute(
+            """INSERT INTO tasks(title,category,priority,due_date,estimated_minutes,completed,created_at,user_id,xp_awarded)
+               VALUES(?,?,?,?,?,0,?,?,0)""",
+            (title, category, priority, due_date, minutes, created, session["user_id"]),
+        )
         row = db.execute("SELECT * FROM tasks WHERE id=?", (cur.lastrowid,)).fetchone()
     return jsonify({"task": task_dict(row)}), 201
+
 
 @app.patch("/api/tasks/<int:task_id>")
 @login_required
 def change_task(task_id):
     data = request.get_json(silent=True) or {}
+    user_id = session["user_id"]
+
     with connect() as db:
-        row = db.execute("SELECT * FROM tasks WHERE id=? AND user_id=?", (task_id, session["user_id"])).fetchone()
+        row = db.execute(
+            "SELECT * FROM tasks WHERE id=? AND user_id=?", (task_id, user_id)
+        ).fetchone()
         if row is None:
             return jsonify({"error": "Task not found."}), 404
-        completed = int(data["completed"]) if isinstance(data.get("completed"), bool) else row["completed"]
-        title = str(data["title"]).strip()[:120] if isinstance(data.get("title"), str) and data["title"].strip() else row["title"]
-        db.execute("UPDATE tasks SET completed=?, title=? WHERE id=? AND user_id=?", (completed, title, task_id, session["user_id"]))
-        updated = db.execute("SELECT * FROM tasks WHERE id=? AND user_id=?", (task_id, session["user_id"])).fetchone()
-    return jsonify({"task": task_dict(updated)})
+
+        was_completed = bool(row["completed"])
+        was_xp_awarded = bool(row["xp_awarded"])
+        completed_target = (
+            bool(data["completed"])
+            if isinstance(data.get("completed"), bool)
+            else was_completed
+        )
+        title = (
+            str(data["title"]).strip()[:120]
+            if isinstance(data.get("title"), str) and data["title"].strip()
+            else row["title"]
+        )
+
+        xp_earned = 0
+        leveled_up = False
+        new_level = None
+        new_title = None
+        streak_bonus = 0
+        newly_unlocked = []
+
+        # If marking complete and XP not yet awarded for this task
+        if completed_target and not was_completed and not was_xp_awarded:
+            db.execute(
+                "UPDATE tasks SET completed=1, title=?, xp_awarded=1 WHERE id=? AND user_id=?",
+                (title, task_id, user_id),
+            )
+            # Award task XP
+            xp_res = award_xp(
+                db,
+                user_id,
+                XP_PER_TASK,
+                "task",
+                f"task:{task_id}",
+                f"Completed task: {title[:40]}",
+            )
+            if xp_res["awarded"]:
+                xp_earned = XP_PER_TASK
+                leveled_up = xp_res.get("leveled_up", False)
+                new_level = xp_res.get("new_level")
+                new_title = xp_res.get("new_title")
+
+            streak_res = update_user_streak_and_award_bonus(db, user_id)
+            streak_bonus = streak_res.get("bonus_xp", 0)
+            newly_unlocked = check_and_unlock_achievements(db, user_id)
+        else:
+            # Update title or completion without duplicate XP
+            db.execute(
+                "UPDATE tasks SET completed=?, title=? WHERE id=? AND user_id=?",
+                (1 if completed_target else 0, title, task_id, user_id),
+            )
+
+        updated = db.execute(
+            "SELECT * FROM tasks WHERE id=? AND user_id=?", (task_id, user_id)
+        ).fetchone()
+        progression = get_user_progression_summary(db, user_id)
+
+    return jsonify(
+        {
+            "task": task_dict(updated),
+            "xp_earned": xp_earned,
+            "leveled_up": leveled_up,
+            "new_level": new_level,
+            "new_title": new_title,
+            "streak_bonus": streak_bonus,
+            "newly_unlocked_achievements": newly_unlocked,
+            "progression": progression,
+        }
+    )
+
 
 @app.delete("/api/tasks/<int:task_id>")
 @login_required
 def remove_task(task_id):
-    with connect() as db: cur = db.execute("DELETE FROM tasks WHERE id=? AND user_id=?", (task_id,session["user_id"]))
-    if cur.rowcount == 0: return jsonify({"error": "Task not found."}), 404
+    with connect() as db:
+        cur = db.execute(
+            "DELETE FROM tasks WHERE id=? AND user_id=?", (task_id, session["user_id"])
+        )
+    if cur.rowcount == 0:
+        return jsonify({"error": "Task not found."}), 404
     return jsonify({"message": "Task deleted."})
+
 
 @app.get("/api/sessions")
 @login_required
 def list_sessions():
-    with connect() as db: rows = db.execute("SELECT * FROM sessions WHERE user_id=? ORDER BY id DESC LIMIT 50", (session["user_id"],)).fetchall()
+    with connect() as db:
+        rows = db.execute(
+            "SELECT * FROM sessions WHERE user_id=? ORDER BY id DESC LIMIT 50",
+            (session["user_id"],),
+        ).fetchall()
     return jsonify({"sessions": [dict(r) for r in rows]})
+
 
 @app.post("/api/sessions")
 @login_required
 def add_session():
     data = request.get_json(silent=True) or {}
-    try: minutes = int(data.get("duration_minutes", 25))
-    except (TypeError, ValueError): minutes = 25
-    if not 1 <= minutes <= 180: return jsonify({"error": "Session duration must be between 1 and 180 minutes."}), 400
+    user_id = session["user_id"]
+
+    try:
+        minutes = int(data.get("duration_minutes", 25))
+    except (TypeError, ValueError):
+        minutes = 25
+
+    if not 1 <= minutes <= 180:
+        return jsonify({"error": "Session duration must be between 1 and 180 minutes."}), 400
+
     stamp = datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+    xp_amount = calculate_session_xp(minutes)
+
     with connect() as db:
-        cur = db.execute("INSERT INTO sessions(duration_minutes,completed_at,user_id) VALUES(?,?,?)", (minutes,stamp,session["user_id"]))
-        row = db.execute("SELECT * FROM sessions WHERE id=?", (cur.lastrowid,)).fetchone()
-    return jsonify({"session": dict(row)}), 201
+        cur = db.execute(
+            "INSERT INTO sessions(duration_minutes,completed_at,user_id,xp_awarded) VALUES(?,?,?,1)",
+            (minutes, stamp, user_id),
+        )
+        session_id = cur.lastrowid
+        row = db.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
+
+        # Award session XP
+        xp_res = award_xp(
+            db,
+            user_id,
+            xp_amount,
+            "session",
+            f"session:{session_id}",
+            f"{minutes}-minute focus block",
+        )
+
+        streak_res = update_user_streak_and_award_bonus(db, user_id)
+        weekly_res = check_weekly_focus_goal_bonus(db, user_id)
+        newly_unlocked = check_and_unlock_achievements(db, user_id)
+        progression = get_user_progression_summary(db, user_id)
+
+    return (
+        jsonify(
+            {
+                "session": dict(row),
+                "xp_earned": xp_amount,
+                "leveled_up": xp_res.get("leveled_up", False),
+                "new_level": xp_res.get("new_level"),
+                "new_title": xp_res.get("new_title"),
+                "streak_bonus": streak_res.get("bonus_xp", 0),
+                "weekly_bonus": weekly_res.get("xp", 0),
+                "newly_unlocked_achievements": newly_unlocked,
+                "progression": progression,
+            }
+        ),
+        201,
+    )
+
+
+@app.get("/api/progression")
+@login_required
+def user_progression():
+    with connect() as db:
+        summary = get_user_progression_summary(db, session["user_id"])
+    return jsonify({"progression": summary})
+
+
+@app.get("/api/achievements")
+@login_required
+def user_achievements():
+    with connect() as db:
+        summary = get_user_progression_summary(db, session["user_id"])
+    return jsonify({"achievements": summary["achievements"]})
+
+
+@app.get("/api/ai/config")
+@login_required
+def get_ai_config():
+    with connect() as db:
+        key = get_api_key(db, session["user_id"])
+        models_data = (
+            fetch_gemini_models(key)
+            if key
+            else {"models": [], "recommended_model": "gemini-1.5-flash", "error": None}
+        )
+
+    masked_key = f"{key[:6]}...{key[-4:]}" if len(key) >= 12 else ("Set" if key else "")
+    return jsonify(
+        {
+            "has_key": bool(key),
+            "masked_key": masked_key,
+            "models": models_data.get("models", []),
+            "recommended_model": models_data.get("recommended_model") or "gemini-1.5-flash",
+            "error": models_data.get("error"),
+        }
+    )
+
+
+@app.post("/api/ai/config")
+@login_required
+def set_ai_config():
+    data = request.get_json(silent=True) or {}
+    key = str(data.get("api_key", "")).strip()
+    if not key:
+        return jsonify({"error": "Gemini API key is required."}), 400
+
+    models_data = fetch_gemini_models(key)
+    if models_data.get("error"):
+        return jsonify({"error": f"Invalid Gemini API key: {models_data['error']}"}), 400
+
+    with connect() as db:
+        save_api_key(db, session["user_id"], key)
+
+    masked_key = f"{key[:6]}...{key[-4:]}" if len(key) >= 12 else "Set"
+    return jsonify(
+        {
+            "status": "ok",
+            "has_key": True,
+            "masked_key": masked_key,
+            "models": models_data.get("models", []),
+            "recommended_model": models_data.get("recommended_model") or "gemini-1.5-flash",
+            "message": "Gemini API key verified and saved successfully.",
+        }
+    )
+
+
+@app.post("/api/ai/chat")
+@login_required
+def ai_chat():
+    data = request.get_json(silent=True) or {}
+    messages = data.get("messages", [])
+    model_name = data.get("model")
+
+    if not isinstance(messages, list) or not messages:
+        return jsonify({"error": "Messages array is required."}), 400
+
+    with connect() as db:
+        result = generate_chat_response(db, session["user_id"], messages, model_name)
+
+    return jsonify(result)
+
 
 if __name__ == "__main__":
     init_db()
