@@ -1,6 +1,6 @@
 # FocusFlow — Smart Productivity Management System
 
-A React + Flask + SQLite web application with account registration/login, per-user tasks and focus history, a Pomodoro timer, rule-based task suggestions, and a remembered day/night theme switch.
+A React + Flask + Neon PostgreSQL web application with account registration/login, per-user tasks and focus history, a Pomodoro timer, rule-based task suggestions, and a remembered day/night theme switch.
 
 ## Requirements
 - Python 3.10 or newer

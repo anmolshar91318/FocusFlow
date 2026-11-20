@@ -5,7 +5,7 @@ anti-exploit validation, and persistent achievement evaluation.
 """
 
 from datetime import datetime, timezone, timedelta
-import sqlite3
+from database import IntegrityError
 
 # XP values for genuine productivity activities
 XP_PER_TASK = 10
@@ -300,7 +300,7 @@ def calculate_session_xp(duration_minutes: int) -> int:
     return min(120, mins)
 
 
-def get_or_init_progression(db: sqlite3.Connection, user_id: int):
+def get_or_init_progression(db, user_id: int):
     """
     Retrieves or initializes a user's progression row in the database.
     If the user has historical sessions or tasks without XP, retroactively
@@ -329,7 +329,7 @@ def get_or_init_progression(db: sqlite3.Connection, user_id: int):
     return dict(row)
 
 
-def _sync_historical_activity(db: sqlite3.Connection, user_id: int):
+def _sync_historical_activity(db, user_id: int):
     """Awards XP and syncs historical tasks and sessions for existing users."""
     now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -355,7 +355,7 @@ def _sync_historical_activity(db: sqlite3.Connection, user_id: int):
                             s["completed_at"] or now_iso,
                         ),
                     )
-                except sqlite3.IntegrityError:
+                except IntegrityError:
                     pass
             db.execute("UPDATE sessions SET xp_awarded=1 WHERE id=?", (s["id"],))
 
@@ -379,7 +379,7 @@ def _sync_historical_activity(db: sqlite3.Connection, user_id: int):
                         t["created_at"] or now_iso,
                     ),
                 )
-            except sqlite3.IntegrityError:
+            except IntegrityError:
                 pass
             db.execute("UPDATE tasks SET xp_awarded=1 WHERE id=?", (t["id"],))
 
@@ -404,7 +404,7 @@ def _sync_historical_activity(db: sqlite3.Connection, user_id: int):
     db.commit()
 
 
-def compute_current_streak(db: sqlite3.Connection, user_id: int) -> int:
+def compute_current_streak(db, user_id: int) -> int:
     """
     Computes active daily streak based on distinct dates of completed sessions
     and completed tasks. A streak continues if there is activity today or yesterday.
@@ -450,7 +450,7 @@ def compute_current_streak(db: sqlite3.Connection, user_id: int) -> int:
     return streak
 
 
-def update_user_streak_and_award_bonus(db: sqlite3.Connection, user_id: int):
+def update_user_streak_and_award_bonus(db, user_id: int):
     """
     Updates the streak and awards the daily streak bonus XP once per calendar day.
     """
@@ -474,7 +474,7 @@ def update_user_streak_and_award_bonus(db: sqlite3.Connection, user_id: int):
                 ),
             )
             bonus_awarded = XP_DAILY_STREAK
-        except sqlite3.IntegrityError:
+        except IntegrityError:
             # Already awarded today
             pass
 
@@ -492,7 +492,7 @@ def update_user_streak_and_award_bonus(db: sqlite3.Connection, user_id: int):
     return {"streak": streak, "bonus_xp": bonus_awarded}
 
 
-def check_weekly_focus_goal_bonus(db: sqlite3.Connection, user_id: int):
+def check_weekly_focus_goal_bonus(db, user_id: int):
     """
     Checks if user completed >= WEEKLY_FOCUS_MINUTES_GOAL in the current calendar week.
     Awards +50 XP bonus once per calendar week.
@@ -527,7 +527,7 @@ def check_weekly_focus_goal_bonus(db: sqlite3.Connection, user_id: int):
             )
             _recalculate_user_level_and_rank(db, user_id)
             return {"awarded": True, "xp": XP_WEEKLY_GOAL}
-        except sqlite3.IntegrityError:
+        except IntegrityError:
             # Already awarded for this week
             pass
 
@@ -535,7 +535,7 @@ def check_weekly_focus_goal_bonus(db: sqlite3.Connection, user_id: int):
 
 
 def award_xp(
-    db: sqlite3.Connection,
+    db,
     user_id: int,
     amount: int,
     activity_type: str,
@@ -559,7 +559,7 @@ def award_xp(
                VALUES(?, ?, ?, ?, ?, ?)""",
             (user_id, amount, activity_type, reference_id, description, now_iso),
         )
-    except sqlite3.IntegrityError:
+    except IntegrityError:
         # Duplicate award prevented!
         return {"awarded": False, "amount": 0, "leveled_up": False, "duplicate": True}
 
@@ -578,7 +578,7 @@ def award_xp(
     }
 
 
-def _recalculate_user_level_and_rank(db: sqlite3.Connection, user_id: int):
+def _recalculate_user_level_and_rank(db, user_id: int):
     """Recalculates user's total XP from ledger and updates progression record."""
     total = (
         db.execute(
@@ -608,7 +608,7 @@ def _recalculate_user_level_and_rank(db: sqlite3.Connection, user_id: int):
     }
 
 
-def check_and_unlock_achievements(db: sqlite3.Connection, user_id: int):
+def check_and_unlock_achievements(db, user_id: int):
     """
     Evaluates all achievements against user's actual database records.
     Awards any newly unlocked achievements and returns a list of newly unlocked ones.
@@ -725,13 +725,13 @@ def check_and_unlock_achievements(db: sqlite3.Connection, user_id: int):
                         "unlocked_at": now_iso,
                     }
                 )
-            except sqlite3.IntegrityError:
+            except IntegrityError:
                 pass
 
     return newly_unlocked
 
 
-def get_user_progression_summary(db: sqlite3.Connection, user_id: int):
+def get_user_progression_summary(db, user_id: int):
     """
     Compiles the full progression, ranks, stats, weekly XP, achievements,
     and upcoming unlock for the user profile and dashboard.

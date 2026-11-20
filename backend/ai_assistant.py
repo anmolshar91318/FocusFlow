@@ -12,7 +12,7 @@ import urllib.request
 import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
-import sqlite3
+from database import OperationalError
 
 from gamification import get_user_progression_summary
 
@@ -105,7 +105,7 @@ def load_env_file():
 load_env_file()
 
 
-def get_api_key(db: sqlite3.Connection = None, user_id: int = None) -> str:
+def get_api_key(db=None, user_id: int = None) -> str:
     """
     Retrieves Gemini API key. Checks:
     1. User's stored key in database (if available)
@@ -118,14 +118,14 @@ def get_api_key(db: sqlite3.Connection = None, user_id: int = None) -> str:
             ).fetchone()
             if row and row["gemini_api_key"] and row["gemini_api_key"].strip():
                 return row["gemini_api_key"].strip()
-        except sqlite3.OperationalError:
+        except OperationalError:
             pass
 
     key = os.environ.get("GEMINI_API_KEY", "").strip()
     return key
 
 
-def save_api_key(db: sqlite3.Connection, user_id: int, api_key: str):
+def save_api_key(db, user_id: int, api_key: str):
     """Saves API key for the user and writes to .env for persistence."""
     api_key = str(api_key).strip()
 
@@ -249,7 +249,7 @@ def fetch_gemini_models(api_key: str):
     }
 
 
-def build_user_context(db: sqlite3.Connection, user_id: int) -> str:
+def build_user_context(db, user_id: int) -> str:
     """
     Gathers comprehensive live user productivity data to ground the AI assistant.
     Includes tasks, focus history, progression, achievements, and habits.
@@ -332,7 +332,7 @@ def build_user_context(db: sqlite3.Connection, user_id: int) -> str:
 
 
 def generate_chat_response(
-    db: sqlite3.Connection,
+    db,
     user_id: int,
     messages: list,
     model_name: str = None,

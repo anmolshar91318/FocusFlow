@@ -9,7 +9,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import unittest
 import json
-import sqlite3
 from datetime import datetime, timezone, timedelta
 from app import app, init_db, connect
 from gamification import (

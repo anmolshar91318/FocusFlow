@@ -1,5 +1,4 @@
 import unittest
-import sqlite3
 import json
 from ai_assistant import (
     build_user_context,

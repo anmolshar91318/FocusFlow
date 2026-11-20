@@ -2,14 +2,13 @@ import os
 import re
 import secrets
 from datetime import datetime, timezone, timedelta
-import sqlite3
 from pathlib import Path
 from functools import wraps
 from flask import Flask, jsonify, request, session
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 
-from database import connect, init_database, USE_POSTGRES, NEON_DATABASE_URL
+from database import connect, init_database, get_neon_database_url, IntegrityError, OperationalError
 from email_service import send_verification_email, send_password_reset_email
 from gamification import (
     calculate_session_xp,
@@ -115,7 +114,7 @@ def index():
     return jsonify({
         "name": "FocusFlow API",
         "status": "online",
-        "database": "Neon PostgreSQL" if USE_POSTGRES else "SQLite",
+        "database": "Neon PostgreSQL",
         "endpoints": {
             "health": "/api/health",
             "auth": "/api/auth/me",
@@ -237,7 +236,7 @@ def register():
                 get_or_init_progression(db, uid)
 
             db.commit()
-    except sqlite3.IntegrityError:
+    except IntegrityError:
         return jsonify({"error": "An account with this email already exists. Please log in."}), 409
 
     # Send verification email via Google SMTP

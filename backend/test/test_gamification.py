@@ -22,21 +22,36 @@ from gamification import (
     XP_DAILY_STREAK,
     XP_WEEKLY_GOAL,
 )
+from database import IntegrityError
+
+class TestDbWrapper:
+    def __init__(self, conn):
+        self._conn = conn
+    def execute(self, *args, **kwargs):
+        try:
+            return self._conn.execute(*args, **kwargs)
+        except sqlite3.IntegrityError as e:
+            raise IntegrityError(str(e)) from e
+    def commit(self):
+        return self._conn.commit()
+    def close(self):
+        return self._conn.close()
 
 class GamificationTestCase(unittest.TestCase):
     def setUp(self):
-        self.db = sqlite3.connect(":memory:")
-        self.db.row_factory = sqlite3.Row
-        self.db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)")
-        self.db.execute("CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT, category TEXT, priority TEXT, due_date TEXT, estimated_minutes INTEGER, completed INTEGER, created_at TEXT, user_id INTEGER, xp_awarded INTEGER DEFAULT 0)")
-        self.db.execute("CREATE TABLE sessions (id INTEGER PRIMARY KEY, duration_minutes INTEGER, completed_at TEXT, user_id INTEGER, xp_awarded INTEGER DEFAULT 0)")
-        self.db.execute("CREATE TABLE user_progression (user_id INTEGER PRIMARY KEY, total_xp INTEGER DEFAULT 0, current_level INTEGER DEFAULT 1, rank_tier TEXT DEFAULT 'Bronze', current_streak INTEGER DEFAULT 0, last_active_date TEXT DEFAULT '', updated_at TEXT)")
-        self.db.execute("CREATE TABLE user_achievements (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, achievement_id TEXT, unlocked_at TEXT, UNIQUE(user_id, achievement_id))")
-        self.db.execute("CREATE TABLE xp_transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, amount INTEGER, activity_type TEXT, reference_id TEXT DEFAULT '', description TEXT, created_at TEXT, UNIQUE(user_id, activity_type, reference_id))")
+        raw_db = sqlite3.connect(":memory:")
+        raw_db.row_factory = sqlite3.Row
+        raw_db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)")
+        raw_db.execute("CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT, category TEXT, priority TEXT, due_date TEXT, estimated_minutes INTEGER, completed INTEGER, created_at TEXT, user_id INTEGER, xp_awarded INTEGER DEFAULT 0)")
+        raw_db.execute("CREATE TABLE sessions (id INTEGER PRIMARY KEY, duration_minutes INTEGER, completed_at TEXT, user_id INTEGER, xp_awarded INTEGER DEFAULT 0)")
+        raw_db.execute("CREATE TABLE user_progression (user_id INTEGER PRIMARY KEY, total_xp INTEGER DEFAULT 0, current_level INTEGER DEFAULT 1, rank_tier TEXT DEFAULT 'Bronze', current_streak INTEGER DEFAULT 0, last_active_date TEXT DEFAULT '', updated_at TEXT)")
+        raw_db.execute("CREATE TABLE user_achievements (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, achievement_id TEXT, unlocked_at TEXT, UNIQUE(user_id, achievement_id))")
+        raw_db.execute("CREATE TABLE xp_transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, amount INTEGER, activity_type TEXT, reference_id TEXT DEFAULT '', description TEXT, created_at TEXT, UNIQUE(user_id, activity_type, reference_id))")
         
         # Insert test user
-        self.db.execute("INSERT INTO users VALUES (1, 'Alice', 'alice@test.com')")
-        self.db.commit()
+        raw_db.execute("INSERT INTO users VALUES (1, 'Alice', 'alice@test.com')")
+        raw_db.commit()
+        self.db = TestDbWrapper(raw_db)
 
     def tearDown(self):
         self.db.close()
