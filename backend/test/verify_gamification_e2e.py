@@ -4,6 +4,9 @@ Leveling, Rewards and Achievement System.
 """
 
 import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import unittest
 import json
 import sqlite3
@@ -26,17 +29,22 @@ class E2EGamificationTests(unittest.TestCase):
         self.client = app.test_client()
         init_db()
 
+    def register_and_verify(self, name, email, password):
+        self.client.post("/api/auth/register", json={"name": name, "email": email, "password": password})
+        with connect() as db:
+            row = db.execute("SELECT verification_code FROM users WHERE email=?", (email,)).fetchone()
+            code = row["verification_code"]
+        res = self.client.post("/api/auth/verify-email", json={"email": email, "code": code})
+        return res.get_json()["user"]
+
     def test_multi_user_isolation_and_xp_accuracy(self):
         """Tests that two separate users have isolated progression and stats."""
         u1_email = f"user_alpha_{int(datetime.now().timestamp() * 1000)}@test.com"
         u2_email = f"user_beta_{int(datetime.now().timestamp() * 1000)}@test.com"
 
         # Register User 1
-        res1 = self.client.post("/api/auth/register", json={
-            "name": "Alpha User", "email": u1_email, "password": "Password123"
-        })
-        self.assertEqual(res1.status_code, 201)
-        u1_id = res1.get_json()["user"]["id"]
+        u1 = self.register_and_verify("Alpha User", u1_email, "Password123")
+        u1_id = u1["id"]
 
         # User 1: complete 25m session
         s1 = self.client.post("/api/sessions", json={"duration_minutes": 25})
@@ -53,11 +61,8 @@ class E2EGamificationTests(unittest.TestCase):
         self.client.post("/api/auth/logout")
 
         # Register User 2
-        res2 = self.client.post("/api/auth/register", json={
-            "name": "Beta User", "email": u2_email, "password": "Password123"
-        })
-        self.assertEqual(res2.status_code, 201)
-        u2_id = res2.get_json()["user"]["id"]
+        u2 = self.register_and_verify("Beta User", u2_email, "Password123")
+        u2_id = u2["id"]
 
         # Check User 2 initial progression (must be 0, completely isolated from User 1)
         p2 = self.client.get("/api/progression").get_json()["progression"]
@@ -87,9 +92,7 @@ class E2EGamificationTests(unittest.TestCase):
     def test_duplicate_prevention_on_tasks(self):
         """Tests that toggling task completion does NOT grant repeated XP."""
         email = f"task_test_{int(datetime.now().timestamp() * 1000)}@test.com"
-        self.client.post("/api/auth/register", json={
-            "name": "Task Tester", "email": email, "password": "Password123"
-        })
+        self.register_and_verify("Task Tester", email, "Password123")
 
         t_res = self.client.post("/api/tasks", json={"title": "Anti-exploit task", "priority": "High"})
         task_id = t_res.get_json()["task"]["id"]

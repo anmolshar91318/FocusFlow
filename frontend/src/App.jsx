@@ -16,7 +16,12 @@ async function api(path, options = {}) {
     ...options,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || "Request failed");
+  if (!res.ok) {
+    const error = new Error(data.error || "Request failed");
+    error.status = res.status;
+    error.data = data;
+    throw error;
+  }
   return data;
 }
 
@@ -311,6 +316,20 @@ function Icon({ name, size = 18 }) {
           <polyline points="12 5 19 12 12 19" />
         </svg>
       );
+    case "arrowLeft":
+      return (
+        <svg {...props}>
+          <line x1="19" y1="12" x2="5" y2="12" />
+          <polyline points="12 19 5 12 12 5" />
+        </svg>
+      );
+    case "mail":
+      return (
+        <svg {...props}>
+          <rect x="3" y="5" width="18" height="14" rx="2" />
+          <polyline points="3 7 12 13 21 7" />
+        </svg>
+      );
     case "sparkle":
       return (
         <svg {...props}>
@@ -355,8 +374,21 @@ export default function App() {
   const [authName, setAuthName] = useState("");
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
+  const [authOtp, setAuthOtp] = useState("");
+  const [authNewPassword, setAuthNewPassword] = useState("");
+  const [authConfirmPassword, setAuthConfirmPassword] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState("");
+  const [authNotice, setAuthNotice] = useState("");
+  const [authResendCooldown, setAuthResendCooldown] = useState(0);
+
+  useEffect(() => {
+    if (authResendCooldown <= 0) return;
+    const interval = setInterval(() => {
+      setAuthResendCooldown((t) => (t > 0 ? t - 1 : 0));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [authResendCooldown]);
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [activeSection, setActiveSection] = useState(() => getInitialSection());
@@ -537,16 +569,144 @@ export default function App() {
     e.preventDefault();
     setAuthBusy(true);
     setAuthError("");
+    setAuthNotice("");
     try {
-      const path = authMode === "register" ? "/auth/register" : "/auth/login";
-      const body =
-        authMode === "register"
-          ? { name: authName, email: authEmail, password: authPassword }
-          : { email: authEmail, password: authPassword };
-      const data = await api(path, { method: "POST", body: JSON.stringify(body) });
+      if (authMode === "register") {
+        const data = await api("/auth/register", {
+          method: "POST",
+          body: JSON.stringify({ name: authName, email: authEmail, password: authPassword }),
+        });
+        setAuthMode("verify");
+        setAuthNotice(data.message || `Verification code sent to ${authEmail}. Please check your inbox.`);
+        setAuthOtp("");
+        setAuthResendCooldown(60);
+      } else {
+        const data = await api("/auth/login", {
+          method: "POST",
+          body: JSON.stringify({ email: authEmail, password: authPassword }),
+        });
+        setUser(data.user);
+        setAuthPassword("");
+        setProfileOpen(false);
+      }
+    } catch (e) {
+      if (e.data && e.data.needs_verification) {
+        setAuthMode("verify");
+        setAuthNotice(e.message || "Please verify your email address to log in.");
+        setAuthOtp("");
+        setAuthResendCooldown(60);
+      } else {
+        setAuthError(e.message);
+      }
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function submitVerify(e) {
+    e.preventDefault();
+    const cleanOtp = authOtp.replace(/\D/g, "");
+    if (!cleanOtp || cleanOtp.length !== 6) {
+      setAuthError("Please enter the complete 6-digit verification code.");
+      return;
+    }
+    setAuthBusy(true);
+    setAuthError("");
+    setAuthNotice("");
+    try {
+      const data = await api("/auth/verify-email", {
+        method: "POST",
+        body: JSON.stringify({ email: authEmail, code: cleanOtp }),
+      });
       setUser(data.user);
       setAuthPassword("");
+      setAuthOtp("");
       setProfileOpen(false);
+    } catch (e) {
+      setAuthError(e.message);
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function handleResendVerification() {
+    if (authResendCooldown > 0 || authBusy) return;
+    setAuthBusy(true);
+    setAuthError("");
+    try {
+      const data = await api("/auth/resend-verification", {
+        method: "POST",
+        body: JSON.stringify({ email: authEmail }),
+      });
+      setAuthNotice(data.message || `A new verification code was sent to ${authEmail}.`);
+      setAuthResendCooldown(60);
+    } catch (e) {
+      setAuthError(e.message);
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function submitForgotPassword(e) {
+    e.preventDefault();
+    if (!authEmail.trim() || !authEmail.includes("@")) {
+      setAuthError("Please enter a valid email address.");
+      return;
+    }
+    setAuthBusy(true);
+    setAuthError("");
+    setAuthNotice("");
+    try {
+      const data = await api("/auth/forgot-password", {
+        method: "POST",
+        body: JSON.stringify({ email: authEmail }),
+      });
+      setAuthMode("reset");
+      setAuthNotice(data.message || `If an account exists, a 6-digit reset code was sent to ${authEmail}.`);
+      setAuthOtp("");
+      setAuthNewPassword("");
+      setAuthConfirmPassword("");
+      setAuthResendCooldown(60);
+    } catch (e) {
+      setAuthError(e.message);
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function submitResetPassword(e) {
+    e.preventDefault();
+    const cleanOtp = authOtp.replace(/\D/g, "");
+    if (!cleanOtp || cleanOtp.length !== 6) {
+      setAuthError("Please enter the 6-digit reset code.");
+      return;
+    }
+    if (authNewPassword.length < 8) {
+      setAuthError("New password must be at least 8 characters.");
+      return;
+    }
+    if (authNewPassword !== authConfirmPassword) {
+      setAuthError("Passwords do not match.");
+      return;
+    }
+    setAuthBusy(true);
+    setAuthError("");
+    setAuthNotice("");
+    try {
+      const data = await api("/auth/reset-password", {
+        method: "POST",
+        body: JSON.stringify({
+          email: authEmail,
+          code: cleanOtp,
+          new_password: authNewPassword,
+        }),
+      });
+      setAuthMode("login");
+      setAuthNotice(data.message || "Password reset successfully! You can now log in.");
+      setAuthOtp("");
+      setAuthNewPassword("");
+      setAuthConfirmPassword("");
+      setAuthPassword("");
     } catch (e) {
       setAuthError(e.message);
     } finally {
@@ -867,82 +1027,299 @@ export default function App() {
             <span>FocusFlow</span>
           </div>
           <p className="eyebrow">YOUR PERSONAL STUDY SPACE</p>
-          <h1>{authMode === "login" ? "Welcome back." : "Create your space."}</h1>
+
+          {authMode === "login" && <h1>Welcome back.</h1>}
+          {authMode === "register" && <h1>Create your space.</h1>}
+          {authMode === "verify" && <h1>Verify your email.</h1>}
+          {authMode === "forgot" && <h1>Reset password.</h1>}
+          {authMode === "reset" && <h1>Set new password.</h1>}
+
           <p className="auth-subtitle">
-            {authMode === "login"
-              ? "Sign in and pick up where your focus left off."
-              : "A calmer way to plan, focus, and make progress."}
+            {authMode === "login" && "Sign in and pick up where your focus left off."}
+            {authMode === "register" && "A calmer way to plan, focus, and make progress."}
+            {authMode === "verify" && `We've sent a 6-digit verification code to ${authEmail || "your email"}. Enter it below.`}
+            {authMode === "forgot" && "Enter your registered email address and we'll send you a 6-digit reset code."}
+            {authMode === "reset" && "Enter the 6-digit reset code sent to your email and choose a new password."}
           </p>
-          <div className="auth-tabs">
-            <button
-              type="button"
-              className={authMode === "login" ? "active" : ""}
-              onClick={() => {
-                setAuthMode("login");
-                setAuthError("");
-              }}
-            >
-              Log in
-            </button>
-            <button
-              type="button"
-              className={authMode === "register" ? "active" : ""}
-              onClick={() => {
-                setAuthMode("register");
-                setAuthError("");
-              }}
-            >
-              Create account
-            </button>
-          </div>
-          <form className="auth-form" onSubmit={submitAuth}>
-            {authMode === "register" && (
+
+          {authMode === "login" || authMode === "register" ? (
+            <div className="auth-tabs">
+              <button
+                type="button"
+                className={authMode === "login" ? "active" : ""}
+                onClick={() => {
+                  setAuthMode("login");
+                  setAuthError("");
+                  setAuthNotice("");
+                }}
+              >
+                Log in
+              </button>
+              <button
+                type="button"
+                className={authMode === "register" ? "active" : ""}
+                onClick={() => {
+                  setAuthMode("register");
+                  setAuthError("");
+                  setAuthNotice("");
+                }}
+              >
+                Create account
+              </button>
+            </div>
+          ) : (
+            <div className="auth-nav-back">
+              <button
+                type="button"
+                className="auth-back-btn"
+                onClick={() => {
+                  setAuthMode("login");
+                  setAuthError("");
+                  setAuthNotice("");
+                }}
+              >
+                <Icon name="arrowLeft" size={14} />
+                <span>Back to Log in</span>
+              </button>
+            </div>
+          )}
+
+          {authNotice && (
+            <div className="auth-notice-banner">
+              <Icon name="checkCircle" size={16} />
+              <span>{authNotice}</span>
+            </div>
+          )}
+
+          {/* LOGIN & REGISTER FORMS */}
+          {(authMode === "login" || authMode === "register") && (
+            <form className="auth-form" onSubmit={submitAuth}>
+              {authMode === "register" && (
+                <label>
+                  Your name
+                  <input
+                    value={authName}
+                    onChange={(e) => setAuthName(e.target.value)}
+                    placeholder="e.g. Anmol"
+                    autoComplete="name"
+                    required
+                    minLength={2}
+                    maxLength={60}
+                  />
+                </label>
+              )}
               <label>
-                Your name
+                Email address
                 <input
-                  value={authName}
-                  onChange={(e) => setAuthName(e.target.value)}
-                  placeholder="e.g. Anmol"
-                  autoComplete="name"
+                  type="email"
+                  value={authEmail}
+                  onChange={(e) => setAuthEmail(e.target.value)}
+                  placeholder="you@example.com"
+                  autoComplete="email"
                   required
-                  minLength={2}
-                  maxLength={60}
                 />
               </label>
-            )}
-            <label>
-              Email address
-              <input
-                type="email"
-                value={authEmail}
-                onChange={(e) => setAuthEmail(e.target.value)}
-                placeholder="you@example.com"
-                autoComplete="email"
-                required
-              />
-            </label>
-            <label>
-              Password
-              <input
-                type="password"
-                value={authPassword}
-                onChange={(e) => setAuthPassword(e.target.value)}
-                placeholder="At least 8 characters"
-                autoComplete={authMode === "login" ? "current-password" : "new-password"}
-                required
-                minLength={8}
-              />
-            </label>
-            {authError && <div className="error">{authError}</div>}
-            <button className="primary auth-submit" disabled={authBusy}>
-              {authBusy
-                ? "Please wait…"
-                : authMode === "login"
-                  ? "Log in to FocusFlow"
-                  : "Create my account"}
-              <Icon name="arrowRight" size={16} />
-            </button>
-          </form>
+              <label>
+                <div className="auth-label-row">
+                  <span>Password</span>
+                  {authMode === "login" && (
+                    <button
+                      type="button"
+                      className="auth-link-subtle"
+                      onClick={() => {
+                        setAuthMode("forgot");
+                        setAuthError("");
+                        setAuthNotice("");
+                      }}
+                    >
+                      Forgot password?
+                    </button>
+                  )}
+                </div>
+                <input
+                  type="password"
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                  placeholder={authMode === "login" ? "Enter your password" : "At least 8 characters"}
+                  autoComplete={authMode === "login" ? "current-password" : "new-password"}
+                  required
+                  minLength={8}
+                />
+              </label>
+              {authError && <div className="error">{authError}</div>}
+              <button className="primary auth-submit" disabled={authBusy}>
+                {authBusy
+                  ? "Please wait…"
+                  : authMode === "login"
+                    ? "Log in to FocusFlow"
+                    : "Create my account"}
+                <Icon name="arrowRight" size={16} />
+              </button>
+            </form>
+          )}
+
+          {/* EMAIL VERIFICATION FORM */}
+          {authMode === "verify" && (
+            <form className="auth-form" onSubmit={submitVerify}>
+              <div className="auth-email-badge">
+                <Icon name="mail" size={16} />
+                <span>{authEmail}</span>
+                <button
+                  type="button"
+                  className="auth-change-link"
+                  onClick={() => {
+                    setAuthMode("register");
+                    setAuthError("");
+                    setAuthNotice("");
+                  }}
+                >
+                  Change
+                </button>
+              </div>
+
+              <label>
+                6-digit verification code
+                <input
+                  className="auth-otp-input"
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  maxLength={6}
+                  value={authOtp}
+                  onChange={(e) => setAuthOtp(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  placeholder="••••••"
+                  autoComplete="one-time-code"
+                  autoFocus
+                  required
+                />
+              </label>
+
+              {authError && <div className="error">{authError}</div>}
+
+              <button className="primary auth-submit" disabled={authBusy || authOtp.length !== 6}>
+                {authBusy ? "Verifying…" : "Verify & Continue"}
+                <Icon name="arrowRight" size={16} />
+              </button>
+
+              <div className="auth-resend-row">
+                <span>Didn't receive the email?</span>
+                {authResendCooldown > 0 ? (
+                  <span className="auth-resend-wait">Resend in {authResendCooldown}s</span>
+                ) : (
+                  <button
+                    type="button"
+                    className="auth-link-btn"
+                    onClick={handleResendVerification}
+                    disabled={authBusy}
+                  >
+                    Resend code
+                  </button>
+                )}
+              </div>
+            </form>
+          )}
+
+          {/* FORGOT PASSWORD FORM */}
+          {authMode === "forgot" && (
+            <form className="auth-form" onSubmit={submitForgotPassword}>
+              <label>
+                Email address
+                <input
+                  type="email"
+                  value={authEmail}
+                  onChange={(e) => setAuthEmail(e.target.value)}
+                  placeholder="you@example.com"
+                  autoComplete="email"
+                  required
+                  autoFocus
+                />
+              </label>
+
+              {authError && <div className="error">{authError}</div>}
+
+              <button className="primary auth-submit" disabled={authBusy}>
+                {authBusy ? "Sending code…" : "Send Reset Code"}
+                <Icon name="arrowRight" size={16} />
+              </button>
+            </form>
+          )}
+
+          {/* RESET PASSWORD FORM */}
+          {authMode === "reset" && (
+            <form className="auth-form" onSubmit={submitResetPassword}>
+              <div className="auth-email-badge">
+                <Icon name="mail" size={16} />
+                <span>{authEmail}</span>
+              </div>
+
+              <label>
+                6-digit reset code
+                <input
+                  className="auth-otp-input"
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  maxLength={6}
+                  value={authOtp}
+                  onChange={(e) => setAuthOtp(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  placeholder="••••••"
+                  autoComplete="one-time-code"
+                  autoFocus
+                  required
+                />
+              </label>
+
+              <label>
+                New password
+                <input
+                  type="password"
+                  value={authNewPassword}
+                  onChange={(e) => setAuthNewPassword(e.target.value)}
+                  placeholder="At least 8 characters"
+                  autoComplete="new-password"
+                  required
+                  minLength={8}
+                />
+              </label>
+
+              <label>
+                Confirm new password
+                <input
+                  type="password"
+                  value={authConfirmPassword}
+                  onChange={(e) => setAuthConfirmPassword(e.target.value)}
+                  placeholder="Confirm new password"
+                  autoComplete="new-password"
+                  required
+                  minLength={8}
+                />
+              </label>
+
+              {authError && <div className="error">{authError}</div>}
+
+              <button className="primary auth-submit" disabled={authBusy || authOtp.length !== 6}>
+                {authBusy ? "Updating password…" : "Reset Password"}
+                <Icon name="arrowRight" size={16} />
+              </button>
+
+              <div className="auth-resend-row">
+                <span>Didn't get the reset code?</span>
+                {authResendCooldown > 0 ? (
+                  <span className="auth-resend-wait">Resend in {authResendCooldown}s</span>
+                ) : (
+                  <button
+                    type="button"
+                    className="auth-link-btn"
+                    onClick={submitForgotPassword}
+                    disabled={authBusy}
+                  >
+                    Resend code
+                  </button>
+                )}
+              </div>
+            </form>
+          )}
+
           <p className="auth-foot">Your tasks, focus sessions, and achievements are saved securely.</p>
           <button
             type="button"

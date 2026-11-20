@@ -1,6 +1,7 @@
 import os
 import re
-from datetime import datetime, timezone
+import secrets
+from datetime import datetime, timezone, timedelta
 import sqlite3
 from pathlib import Path
 from functools import wraps
@@ -9,6 +10,7 @@ from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 
 from database import connect, init_database, USE_POSTGRES, NEON_DATABASE_URL
+from email_service import send_verification_email, send_password_reset_email
 from gamification import (
     calculate_session_xp,
     award_xp,
@@ -126,8 +128,32 @@ def index():
     })
 
 
+def generate_otp(length=6) -> str:
+    """Generates a cryptographically secure numeric OTP."""
+    return "".join(secrets.choice("0123456789") for _ in range(length))
+
+
+def is_code_valid(stored_code: str, stored_expiry: str, input_code: str) -> tuple[bool, str]:
+    """Validates an OTP against stored code and ISO timestamp expiration."""
+    if not stored_code or not stored_expiry:
+        return False, "No active code found. Please request a new code."
+    if str(stored_code).strip() != str(input_code).strip():
+        return False, "Invalid code. Please check and try again."
+    try:
+        expiry_str = str(stored_expiry).strip()
+        expiry_dt = datetime.fromisoformat(expiry_str)
+        if expiry_dt.tzinfo is None:
+            expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) > expiry_dt:
+            return False, "The code has expired. Please request a new code."
+    except Exception:
+        return False, "Code verification failed or format is invalid."
+    return True, ""
+
+
 def user_payload(row):
-    return {"id": row["id"], "name": row["name"], "email": row["email"]}
+    is_verified = bool(row["is_verified"]) if "is_verified" in row.keys() else True
+    return {"id": row["id"], "name": row["name"], "email": row["email"], "is_verified": is_verified}
 
 
 def login_required(fn):
@@ -158,7 +184,7 @@ def current_user():
     if not uid:
         return jsonify({"user": None})
     with connect() as db:
-        row = db.execute("SELECT id,name,email FROM users WHERE id=?", (uid,)).fetchone()
+        row = db.execute("SELECT id,name,email,is_verified FROM users WHERE id=?", (uid,)).fetchone()
     if row is None:
         session.clear()
         return jsonify({"user": None})
@@ -179,25 +205,174 @@ def register():
     if len(password) < 8:
         return jsonify({"error": "Password must contain at least 8 characters."}), 400
 
+    code = generate_otp(6)
+    expiry = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
+
     try:
         with connect() as db:
-            cur = db.execute(
-                "INSERT INTO users(name,email,password_hash,created_at) VALUES(?,?,?,?)",
-                (name, email, generate_password_hash(password), datetime.now(timezone.utc).isoformat()),
-            )
-            uid = cur.lastrowid
-            if db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1:
-                db.execute("UPDATE tasks SET user_id=? WHERE user_id IS NULL", (uid,))
-                db.execute("UPDATE sessions SET user_id=? WHERE user_id IS NULL", (uid,))
-            # Initialize user progression
-            get_or_init_progression(db, uid)
-            row = db.execute("SELECT id,name,email FROM users WHERE id=?", (uid,)).fetchone()
+            existing = db.execute("SELECT id, name, is_verified FROM users WHERE LOWER(email)=?", (email,)).fetchone()
+            if existing:
+                if bool(existing["is_verified"]):
+                    return jsonify({"error": "An account with this email already exists. Please log in."}), 409
+                # Unverified account already exists: refresh credentials & verification code
+                db.execute(
+                    """UPDATE users 
+                       SET name=?, password_hash=?, verification_code=?, verification_code_expires_at=? 
+                       WHERE id=?""",
+                    (name, generate_password_hash(password), code, expiry, existing["id"]),
+                )
+                uid = existing["id"]
+            else:
+                cur = db.execute(
+                    """INSERT INTO users(name, email, password_hash, created_at, is_verified, verification_code, verification_code_expires_at)
+                       VALUES(?,?,?,?,0,?,?)""",
+                    (name, email, generate_password_hash(password), now_iso, code, expiry),
+                )
+                uid = cur.lastrowid
+                if db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1:
+                    db.execute("UPDATE tasks SET user_id=? WHERE user_id IS NULL", (uid,))
+                    db.execute("UPDATE sessions SET user_id=? WHERE user_id IS NULL", (uid,))
+                # Initialize user progression
+                get_or_init_progression(db, uid)
+
+            db.commit()
     except sqlite3.IntegrityError:
         return jsonify({"error": "An account with this email already exists. Please log in."}), 409
 
+    # Send verification email via Google SMTP
+    email_res = send_verification_email(email, name, code)
+
+    return jsonify({
+        "status": "verification_required",
+        "email": email,
+        "message": f"Verification code sent to {email}. Please enter the 6-digit code to activate your account.",
+        "email_sent": email_res.get("success", False),
+    }), 201
+
+
+@app.post("/api/auth/verify-email")
+def verify_email():
+    data = request.get_json(silent=True) or {}
+    email = str(data.get("email", "")).strip().lower()
+    code = str(data.get("code", "")).strip()
+
+    if not email or not code:
+        return jsonify({"error": "Email and 6-digit verification code are required."}), 400
+
+    with connect() as db:
+        row = db.execute("SELECT * FROM users WHERE LOWER(email)=?", (email,)).fetchone()
+        if row is None:
+            return jsonify({"error": "No account found with this email."}), 404
+
+        if bool(row["is_verified"]):
+            session.clear()
+            session["user_id"] = row["id"]
+            return jsonify({"message": "Email is already verified.", "user": user_payload(row)}), 200
+
+        valid, err_msg = is_code_valid(row["verification_code"], row["verification_code_expires_at"], code)
+        if not valid:
+            return jsonify({"error": err_msg}), 400
+
+        db.execute(
+            "UPDATE users SET is_verified=1, verification_code='', verification_code_expires_at='' WHERE id=?",
+            (row["id"],),
+        )
+        db.commit()
+        updated_row = db.execute("SELECT * FROM users WHERE id=?", (row["id"],)).fetchone()
+        get_or_init_progression(db, row["id"])
+        check_and_unlock_achievements(db, row["id"])
+
     session.clear()
-    session["user_id"] = uid
-    return jsonify({"user": user_payload(row)}), 201
+    session["user_id"] = row["id"]
+    return jsonify({
+        "message": "Email verified successfully! Welcome to FocusFlow.",
+        "user": user_payload(updated_row),
+    }), 200
+
+
+@app.post("/api/auth/resend-verification")
+def resend_verification():
+    data = request.get_json(silent=True) or {}
+    email = str(data.get("email", "")).strip().lower()
+
+    if not email or "@" not in email:
+        return jsonify({"error": "Enter a valid email address."}), 400
+
+    with connect() as db:
+        row = db.execute("SELECT * FROM users WHERE LOWER(email)=?", (email,)).fetchone()
+        if row is None:
+            return jsonify({"message": "If an unverified account with this email exists, a code was sent."}), 200
+
+        if bool(row["is_verified"]):
+            return jsonify({"message": "This email is already verified. You can log in directly."}), 200
+
+        code = generate_otp(6)
+        expiry = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
+        db.execute(
+            "UPDATE users SET verification_code=?, verification_code_expires_at=? WHERE id=?",
+            (code, expiry, row["id"]),
+        )
+        db.commit()
+        send_verification_email(row["email"], row["name"], code)
+
+    return jsonify({"message": f"A new 6-digit verification code has been sent to {email}."}), 200
+
+
+@app.post("/api/auth/forgot-password")
+def forgot_password():
+    data = request.get_json(silent=True) or {}
+    email = str(data.get("email", "")).strip().lower()
+
+    if not email or "@" not in email:
+        return jsonify({"error": "Enter a valid email address."}), 400
+
+    with connect() as db:
+        row = db.execute("SELECT id, name, email FROM users WHERE LOWER(email)=?", (email,)).fetchone()
+        if row is not None:
+            code = generate_otp(6)
+            expiry = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
+            db.execute(
+                "UPDATE users SET reset_code=?, reset_code_expires_at=? WHERE id=?",
+                (code, expiry, row["id"]),
+            )
+            db.commit()
+            send_password_reset_email(row["email"], row["name"], code)
+
+    return jsonify({
+        "message": "If an account exists with this email, a 6-digit password reset code has been sent."
+    }), 200
+
+
+@app.post("/api/auth/reset-password")
+def reset_password():
+    data = request.get_json(silent=True) or {}
+    email = str(data.get("email", "")).strip().lower()
+    code = str(data.get("code", "")).strip()
+    new_password = str(data.get("new_password", ""))
+
+    if not email or not code:
+        return jsonify({"error": "Email and 6-digit reset code are required."}), 400
+    if len(new_password) < 8:
+        return jsonify({"error": "New password must contain at least 8 characters."}), 400
+
+    with connect() as db:
+        row = db.execute("SELECT * FROM users WHERE LOWER(email)=?", (email,)).fetchone()
+        if row is None:
+            return jsonify({"error": "Invalid email or reset code."}), 400
+
+        valid, err_msg = is_code_valid(row["reset_code"], row["reset_code_expires_at"], code)
+        if not valid:
+            return jsonify({"error": err_msg}), 400
+
+        new_hash = generate_password_hash(new_password)
+        db.execute(
+            "UPDATE users SET password_hash=?, reset_code='', reset_code_expires_at='', is_verified=1 WHERE id=?",
+            (new_hash, row["id"]),
+        )
+        db.commit()
+
+    return jsonify({"message": "Password reset successfully! You can now log in with your new password."}), 200
 
 
 @app.post("/api/auth/login")
@@ -207,9 +382,27 @@ def login():
     password = str(data.get("password", ""))
 
     with connect() as db:
-        row = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+        row = db.execute("SELECT * FROM users WHERE LOWER(email)=?", (email,)).fetchone()
         if row is None or not check_password_hash(row["password_hash"], password):
             return jsonify({"error": "Incorrect email or password."}), 401
+
+        is_verified = bool(row["is_verified"]) if "is_verified" in row.keys() else True
+        if not is_verified:
+            # Resend fresh verification code
+            code = generate_otp(6)
+            expiry = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
+            db.execute(
+                "UPDATE users SET verification_code=?, verification_code_expires_at=? WHERE id=?",
+                (code, expiry, row["id"]),
+            )
+            db.commit()
+            send_verification_email(row["email"], row["name"], code)
+            return jsonify({
+                "error": "Your email address is not verified yet. We have sent a 6-digit verification code to your email.",
+                "needs_verification": True,
+                "email": row["email"],
+            }), 403
+
         # Ensure progression row and sync
         get_or_init_progression(db, row["id"])
         check_and_unlock_achievements(db, row["id"])

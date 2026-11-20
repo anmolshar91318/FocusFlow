@@ -1,3 +1,7 @@
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import unittest
 import json
 from app import app, init_db, connect
@@ -18,6 +22,16 @@ class ApiIntegrationTestCase(unittest.TestCase):
             "password": "Password123!"
         })
         self.assertEqual(res.status_code, 201)
+
+        # 1b. Verify email
+        with connect() as db:
+            row = db.execute("SELECT verification_code FROM users WHERE email=?", (email,)).fetchone()
+            code = row["verification_code"]
+        v_res = self.client.post("/api/auth/verify-email", json={
+            "email": email,
+            "code": code
+        })
+        self.assertEqual(v_res.status_code, 200)
 
         # 2. Check initial progression
         res = self.client.get("/api/progression")

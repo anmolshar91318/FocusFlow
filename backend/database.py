@@ -1,78 +1,76 @@
 import os
 import re
-import shutil
-import sqlite3
 from pathlib import Path
-from dotenv import load_dotenv
 
-# Load environment variables from backend/.env if present
-load_dotenv(Path(__file__).with_name(".env"))
+# Load environment variables from backend/.env or root .env
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).with_name(".env"))
+except ImportError:
+    for p in [Path(__file__).with_name(".env"), Path(__file__).parent.parent / ".env"]:
+        if p.exists():
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.strip().strip("'\"")
+                        if k and k not in os.environ:
+                            os.environ[k] = v
+            except Exception:
+                pass
 
 try:
     import psycopg2
     import psycopg2.extras
+    IntegrityError = psycopg2.IntegrityError
+    OperationalError = psycopg2.OperationalError
+    DatabaseError = psycopg2.DatabaseError
+    DataError = psycopg2.DataError
 except ImportError:
     psycopg2 = None
 
-# Environment variable check for Neon / PostgreSQL
-NEON_DATABASE_URL = (
-    os.environ.get("NEON_DATABASE_URL")
-    or os.environ.get("DATABASE_URL")
-    or os.environ.get("POSTGRES_URL")
-    or ""
-).strip()
+    class IntegrityError(Exception):
+        pass
 
-# Adjust postgres:// to postgresql:// if needed for psycopg2
-if NEON_DATABASE_URL.startswith("postgres://"):
-    NEON_DATABASE_URL = "postgresql://" + NEON_DATABASE_URL[len("postgres://") :]
+    class OperationalError(Exception):
+        pass
 
-# Ensure sslmode=require for cloud Neon connections
-if NEON_DATABASE_URL and "sslmode" not in NEON_DATABASE_URL:
-    separator = "&" if "?" in NEON_DATABASE_URL else "?"
-    NEON_DATABASE_URL = f"{NEON_DATABASE_URL}{separator}sslmode=require"
+    class DatabaseError(Exception):
+        pass
 
-# Flag indicating whether Neon PostgreSQL is active
-USE_POSTGRES = bool(NEON_DATABASE_URL and psycopg2 is not None)
-
-# SQLite fallback path
-BASE_DIR = Path(__file__).parent.resolve()
-DEFAULT_SQLITE_PATH = BASE_DIR / "focusflow.db"
+    class DataError(Exception):
+        pass
 
 
-def _get_sqlite_path() -> Path:
-    """Returns a writable SQLite file path, falling back to /tmp if read-only (e.g., on Vercel)."""
-    # If running on Vercel or similar read-only serverless environment
-    if os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
-        tmp_db = Path("/tmp/focusflow.db")
-        if not tmp_db.exists() and DEFAULT_SQLITE_PATH.exists():
-            try:
-                shutil.copy2(DEFAULT_SQLITE_PATH, tmp_db)
-            except Exception:
-                pass
-        return tmp_db
+def get_neon_database_url() -> str:
+    """Retrieves and sanitizes Neon PostgreSQL connection URL."""
+    url = (
+        os.environ.get("NEON_DATABASE_URL")
+        or os.environ.get("DATABASE_URL")
+        or os.environ.get("POSTGRES_URL")
+        or ""
+    ).strip()
 
-    # Test writability of current directory / database file
-    try:
-        if DEFAULT_SQLITE_PATH.exists():
-            with open(DEFAULT_SQLITE_PATH, "a"):
-                pass
-        else:
-            with open(DEFAULT_SQLITE_PATH, "w"):
-                pass
-        return DEFAULT_SQLITE_PATH
-    except (IOError, OSError, PermissionError):
-        # Read-only filesystem fallback
-        tmp_db = Path("/tmp/focusflow.db")
-        if not tmp_db.exists() and DEFAULT_SQLITE_PATH.exists():
-            try:
-                shutil.copy2(DEFAULT_SQLITE_PATH, tmp_db)
-            except Exception:
-                pass
-        return tmp_db
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://") :]
+
+    if url and "sslmode" not in url:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}sslmode=require"
+
+    return url
+
+
+# Flag indicating whether Neon PostgreSQL is configured
+USE_POSTGRES = True
 
 
 class DictLikeRow:
-    """Provides sqlite3.Row-like access (by name and by index) for PostgreSQL query results."""
+    """Provides dictionary and index access for PostgreSQL query results."""
 
     def __init__(self, description, values):
         self._values = tuple(values)
@@ -109,7 +107,7 @@ class DictLikeRow:
 
 
 def _translate_query(query: str) -> str:
-    """Translates SQLite SQL query with '?' parameter markers to PostgreSQL '%s'."""
+    """Translates SQL query with '?' parameter markers to PostgreSQL '%s'."""
     parts = []
     tokens = re.split(r"('(?:''|[^'])*')", query)
     for i, token in enumerate(tokens):
@@ -121,7 +119,7 @@ def _translate_query(query: str) -> str:
 
 
 class PostgresCursorWrapper:
-    """Wraps psycopg2 cursor to mirror sqlite3 cursor methods and properties."""
+    """Wraps psycopg2 cursor with dict-like row access and lastrowid support."""
 
     def __init__(self, cursor, lastrowid=None):
         self._cursor = cursor
@@ -154,7 +152,7 @@ class PostgresCursorWrapper:
 
 
 class PostgresConnectionWrapper:
-    """Context manager and connection wrapper for PostgreSQL."""
+    """Connection wrapper for Neon PostgreSQL."""
 
     def __init__(self, dsn):
         self._dsn = dsn
@@ -164,7 +162,7 @@ class PostgresConnectionWrapper:
         raw_query = query.strip()
         lastrowid = None
 
-        # Intercept SQLite PRAGMA table_info(<table>)
+        # Intercept table info queries to read from PostgreSQL information_schema
         pragma_match = re.match(r"^PRAGMA\s+table_info\((\w+)\)", raw_query, re.IGNORECASE)
         if pragma_match:
             table_name = pragma_match.group(1).lower()
@@ -184,23 +182,18 @@ class PostgresConnectionWrapper:
         has_returning = re.search(r"\bRETURNING\b", translated_sql, re.IGNORECASE)
 
         cur = self._conn.cursor()
-        try:
-            if is_insert and not has_returning:
-                table_name = is_insert.group(1).lower()
-                pk_col = "user_id" if table_name == "user_progression" else "id"
-                try_sql = f"{translated_sql.rstrip().rstrip(';')} RETURNING {pk_col};"
-                cur.execute(try_sql, params or ())
-                res = cur.fetchone()
-                if res:
-                    lastrowid = res[0]
-                return PostgresCursorWrapper(cur, lastrowid=lastrowid)
-
-            cur.execute(translated_sql, params or ())
+        if is_insert and not has_returning:
+            table_name = is_insert.group(1).lower()
+            pk_col = "user_id" if table_name == "user_progression" else "id"
+            try_sql = f"{translated_sql.rstrip().rstrip(';')} RETURNING {pk_col};"
+            cur.execute(try_sql, params or ())
+            res = cur.fetchone()
+            if res:
+                lastrowid = res[0]
             return PostgresCursorWrapper(cur, lastrowid=lastrowid)
-        except psycopg2.IntegrityError as e:
-            raise sqlite3.IntegrityError(str(e)) from e
-        except psycopg2.OperationalError as e:
-            raise sqlite3.OperationalError(str(e)) from e
+
+        cur.execute(translated_sql, params or ())
+        return PostgresCursorWrapper(cur, lastrowid=lastrowid)
 
     def commit(self):
         self._conn.commit()
@@ -227,194 +220,128 @@ class PostgresConnectionWrapper:
 
 def connect():
     """
-    Connects to the database.
-    If NEON_DATABASE_URL or DATABASE_URL is set, connects to Neon PostgreSQL.
-    Otherwise, connects to the local SQLite database (with /tmp fallback on Vercel).
+    Connects directly to Neon PostgreSQL.
+    Raises RuntimeError if NEON_DATABASE_URL is not configured.
     """
-    if USE_POSTGRES:
-        try:
-            return PostgresConnectionWrapper(NEON_DATABASE_URL)
-        except Exception as e:
-            print(f"[FocusFlow DB] Warning: Failed to connect to Neon PostgreSQL ({e}). Falling back to SQLite.")
+    if psycopg2 is None:
+        raise ImportError(
+            "psycopg2 is required to connect to Neon PostgreSQL. "
+            "Please install it with: pip install psycopg2-binary"
+        )
 
-    # SQLite fallback
-    db_path = _get_sqlite_path()
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    return conn
+    dsn = get_neon_database_url()
+    if not dsn:
+        raise RuntimeError(
+            "NEON_DATABASE_URL is not configured. FocusFlow connects exclusively to Neon PostgreSQL. "
+            "Please set NEON_DATABASE_URL in backend/.env "
+            "(e.g., NEON_DATABASE_URL=postgresql://user:password@ep-xyz.aws.neon.tech/neondb?sslmode=require)."
+        )
+
+    return PostgresConnectionWrapper(dsn)
 
 
 def init_database():
-    """Initializes database schema for either PostgreSQL or SQLite."""
+    """Initializes the Neon PostgreSQL schema, tables, and indexes."""
     with connect() as db:
-        if USE_POSTGRES:
-            # PostgreSQL Schema
-            db.execute(
-                """CREATE TABLE IF NOT EXISTS users (
-                    id SERIAL PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    email TEXT NOT NULL UNIQUE,
-                    password_hash TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    gemini_api_key TEXT DEFAULT ''
-                )"""
-            )
-            db.execute(
-                """CREATE TABLE IF NOT EXISTS tasks (
-                    id SERIAL PRIMARY KEY,
-                    title TEXT NOT NULL,
-                    category TEXT NOT NULL DEFAULT 'Study',
-                    priority TEXT NOT NULL DEFAULT 'Medium',
-                    due_date TEXT NOT NULL DEFAULT '',
-                    estimated_minutes INTEGER NOT NULL DEFAULT 30,
-                    completed INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    user_id INTEGER REFERENCES users(id),
-                    xp_awarded INTEGER NOT NULL DEFAULT 0
-                )"""
-            )
-            db.execute(
-                """CREATE TABLE IF NOT EXISTS sessions (
-                    id SERIAL PRIMARY KEY,
-                    duration_minutes INTEGER NOT NULL,
-                    completed_at TEXT NOT NULL,
-                    user_id INTEGER REFERENCES users(id),
-                    xp_awarded INTEGER NOT NULL DEFAULT 0
-                )"""
-            )
-            db.execute(
-                """CREATE TABLE IF NOT EXISTS user_progression (
-                    user_id INTEGER PRIMARY KEY REFERENCES users(id),
-                    total_xp INTEGER NOT NULL DEFAULT 0,
-                    current_level INTEGER NOT NULL DEFAULT 1,
-                    rank_tier TEXT NOT NULL DEFAULT 'Bronze',
-                    current_streak INTEGER NOT NULL DEFAULT 0,
-                    last_active_date TEXT NOT NULL DEFAULT '',
-                    updated_at TEXT NOT NULL
-                )"""
-            )
-            db.execute(
-                """CREATE TABLE IF NOT EXISTS user_achievements (
-                    id SERIAL PRIMARY KEY,
-                    user_id INTEGER NOT NULL REFERENCES users(id),
-                    achievement_id TEXT NOT NULL,
-                    unlocked_at TEXT NOT NULL,
-                    UNIQUE(user_id, achievement_id)
-                )"""
-            )
-            db.execute(
-                """CREATE TABLE IF NOT EXISTS xp_transactions (
-                    id SERIAL PRIMARY KEY,
-                    user_id INTEGER NOT NULL REFERENCES users(id),
-                    amount INTEGER NOT NULL,
-                    activity_type TEXT NOT NULL,
-                    reference_id TEXT NOT NULL DEFAULT '',
-                    description TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    UNIQUE(user_id, activity_type, reference_id)
-                )"""
-            )
+        # Neon PostgreSQL Schema
+        db.execute(
+            """CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                gemini_api_key TEXT DEFAULT '',
+                is_verified INTEGER NOT NULL DEFAULT 0,
+                verification_code TEXT DEFAULT '',
+                verification_code_expires_at TEXT DEFAULT '',
+                reset_code TEXT DEFAULT '',
+                reset_code_expires_at TEXT DEFAULT ''
+            )"""
+        )
+        db.execute(
+            """CREATE TABLE IF NOT EXISTS tasks (
+                id SERIAL PRIMARY KEY,
+                title TEXT NOT NULL,
+                category TEXT NOT NULL DEFAULT 'Study',
+                priority TEXT NOT NULL DEFAULT 'Medium',
+                due_date TEXT NOT NULL DEFAULT '',
+                estimated_minutes INTEGER NOT NULL DEFAULT 30,
+                completed INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                user_id INTEGER REFERENCES users(id),
+                xp_awarded INTEGER NOT NULL DEFAULT 0
+            )"""
+        )
+        db.execute(
+            """CREATE TABLE IF NOT EXISTS sessions (
+                id SERIAL PRIMARY KEY,
+                duration_minutes INTEGER NOT NULL,
+                completed_at TEXT NOT NULL,
+                user_id INTEGER REFERENCES users(id),
+                xp_awarded INTEGER NOT NULL DEFAULT 0
+            )"""
+        )
+        db.execute(
+            """CREATE TABLE IF NOT EXISTS user_progression (
+                user_id INTEGER PRIMARY KEY REFERENCES users(id),
+                total_xp INTEGER NOT NULL DEFAULT 0,
+                current_level INTEGER NOT NULL DEFAULT 1,
+                rank_tier TEXT NOT NULL DEFAULT 'Bronze',
+                current_streak INTEGER NOT NULL DEFAULT 0,
+                last_active_date TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            )"""
+        )
+        db.execute(
+            """CREATE TABLE IF NOT EXISTS user_achievements (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                achievement_id TEXT NOT NULL,
+                unlocked_at TEXT NOT NULL,
+                UNIQUE(user_id, achievement_id)
+            )"""
+        )
+        db.execute(
+            """CREATE TABLE IF NOT EXISTS xp_transactions (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                amount INTEGER NOT NULL,
+                activity_type TEXT NOT NULL,
+                reference_id TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(user_id, activity_type, reference_id)
+            )"""
+        )
 
-            # Ensure columns exist in case of partial migrations
-            user_cols = {r["name"] for r in db.execute("PRAGMA table_info(users)")}
-            if "gemini_api_key" not in user_cols:
-                db.execute("ALTER TABLE users ADD COLUMN gemini_api_key TEXT DEFAULT ''")
+        # Ensure columns exist in case of partial migrations
+        user_cols = {r["name"] for r in db.execute("PRAGMA table_info(users)")}
+        if "gemini_api_key" not in user_cols:
+            db.execute("ALTER TABLE users ADD COLUMN gemini_api_key TEXT DEFAULT ''")
+        if "is_verified" not in user_cols:
+            db.execute("ALTER TABLE users ADD COLUMN is_verified INTEGER NOT NULL DEFAULT 0")
+            db.execute("UPDATE users SET is_verified = 1 WHERE is_verified IS NULL OR is_verified = 0")
+        if "verification_code" not in user_cols:
+            db.execute("ALTER TABLE users ADD COLUMN verification_code TEXT DEFAULT ''")
+        if "verification_code_expires_at" not in user_cols:
+            db.execute("ALTER TABLE users ADD COLUMN verification_code_expires_at TEXT DEFAULT ''")
+        if "reset_code" not in user_cols:
+            db.execute("ALTER TABLE users ADD COLUMN reset_code TEXT DEFAULT ''")
+        if "reset_code_expires_at" not in user_cols:
+            db.execute("ALTER TABLE users ADD COLUMN reset_code_expires_at TEXT DEFAULT ''")
 
-            for table in ("tasks", "sessions"):
-                cols = {r["name"] for r in db.execute(f"PRAGMA table_info({table})")}
-                if "user_id" not in cols:
-                    db.execute(f"ALTER TABLE {table} ADD COLUMN user_id INTEGER REFERENCES users(id)")
-                if "xp_awarded" not in cols:
-                    db.execute(f"ALTER TABLE {table} ADD COLUMN xp_awarded INTEGER NOT NULL DEFAULT 0")
+        for table in ("tasks", "sessions"):
+            cols = {r["name"] for r in db.execute(f"PRAGMA table_info({table})")}
+            if "user_id" not in cols:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN user_id INTEGER REFERENCES users(id)")
+            if "xp_awarded" not in cols:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN xp_awarded INTEGER NOT NULL DEFAULT 0")
 
-            db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks(user_id)")
-            db.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
-            db.execute("CREATE INDEX IF NOT EXISTS idx_xp_user ON xp_transactions(user_id)")
-            db.execute("CREATE INDEX IF NOT EXISTS idx_achieve_user ON user_achievements(user_id)")
-            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_lower_email ON users (LOWER(email))")
-
-        else:
-            # SQLite Schema
-            db.execute(
-                """CREATE TABLE IF NOT EXISTS users (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL,
-                    email TEXT NOT NULL UNIQUE COLLATE NOCASE,
-                    password_hash TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                )"""
-            )
-            db.execute(
-                """CREATE TABLE IF NOT EXISTS tasks (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    title TEXT NOT NULL,
-                    category TEXT NOT NULL DEFAULT 'Study',
-                    priority TEXT NOT NULL DEFAULT 'Medium',
-                    due_date TEXT NOT NULL DEFAULT '',
-                    estimated_minutes INTEGER NOT NULL DEFAULT 30,
-                    completed INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    user_id INTEGER REFERENCES users(id),
-                    xp_awarded INTEGER NOT NULL DEFAULT 0
-                )"""
-            )
-            db.execute(
-                """CREATE TABLE IF NOT EXISTS sessions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    duration_minutes INTEGER NOT NULL,
-                    completed_at TEXT NOT NULL,
-                    user_id INTEGER REFERENCES users(id),
-                    xp_awarded INTEGER NOT NULL DEFAULT 0
-                )"""
-            )
-            db.execute(
-                """CREATE TABLE IF NOT EXISTS user_progression (
-                    user_id INTEGER PRIMARY KEY REFERENCES users(id),
-                    total_xp INTEGER NOT NULL DEFAULT 0,
-                    current_level INTEGER NOT NULL DEFAULT 1,
-                    rank_tier TEXT NOT NULL DEFAULT 'Bronze',
-                    current_streak INTEGER NOT NULL DEFAULT 0,
-                    last_active_date TEXT NOT NULL DEFAULT '',
-                    updated_at TEXT NOT NULL
-                )"""
-            )
-            db.execute(
-                """CREATE TABLE IF NOT EXISTS user_achievements (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL REFERENCES users(id),
-                    achievement_id TEXT NOT NULL,
-                    unlocked_at TEXT NOT NULL,
-                    UNIQUE(user_id, achievement_id)
-                )"""
-            )
-            db.execute(
-                """CREATE TABLE IF NOT EXISTS xp_transactions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL REFERENCES users(id),
-                    amount INTEGER NOT NULL,
-                    activity_type TEXT NOT NULL,
-                    reference_id TEXT NOT NULL DEFAULT '',
-                    description TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    UNIQUE(user_id, activity_type, reference_id)
-                )"""
-            )
-
-            user_cols = {r["name"] for r in db.execute("PRAGMA table_info(users)")}
-            if "gemini_api_key" not in user_cols:
-                db.execute("ALTER TABLE users ADD COLUMN gemini_api_key TEXT DEFAULT ''")
-
-            for table in ("tasks", "sessions"):
-                cols = {r["name"] for r in db.execute(f"PRAGMA table_info({table})")}
-                if "user_id" not in cols:
-                    db.execute(f"ALTER TABLE {table} ADD COLUMN user_id INTEGER REFERENCES users(id)")
-                if "xp_awarded" not in cols:
-                    db.execute(f"ALTER TABLE {table} ADD COLUMN xp_awarded INTEGER NOT NULL DEFAULT 0")
-
-            db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks(user_id)")
-            db.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
-            db.execute("CREATE INDEX IF NOT EXISTS idx_xp_user ON xp_transactions(user_id)")
-            db.execute("CREATE INDEX IF NOT EXISTS idx_achieve_user ON user_achievements(user_id)")
-            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_lower_email ON users (LOWER(email))")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks(user_id)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_xp_user ON xp_transactions(user_id)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_achieve_user ON user_achievements(user_id)")
+        db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_lower_email ON users (LOWER(email))")
 
         db.commit()
